@@ -109,6 +109,11 @@ def main():
             raise Refused(f'unknown commit {args.commit or args.branch}') from None
         if run('git', 'merge-base', '--is-ancestor', target, args.branch, check=False, quiet=True).returncode != 0:
             raise Refused(f'{target[:7]} is not on {args.branch}; deploy only commits that were merged there')
+        # An untracked file where the target adds a tracked one would make the checkout abort halfway.
+        added = set(git('diff', '--name-only', '--diff-filter=A', previous, target).splitlines())
+        blocking = sorted(added & set(git('ls-files', '--others', '--exclude-standard').splitlines()))
+        if blocking:
+            raise Refused('untracked files would be overwritten by the target commit: ' + ', '.join(blocking))
     except Refused as error:
         print(f'refused: {error}', file=sys.stderr)
         return 2
