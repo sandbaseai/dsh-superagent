@@ -13,6 +13,7 @@ import type { SourceRegistry } from './registry.ts'
 export { SOURCE, feishuRef, feishuThreadId, feishuTime, feishuTrigger, feishuTriggerId, historyEvent, withMentionNames }
   from './feishu-trigger.ts'
 export type { FeishuEvent } from './feishu-trigger.ts'
+export { alertThreadId, isAlertThread, parseAlert, type FeishuAlert } from './feishu-alert.ts'
 export { backfillChat, consumerRetry, pollThreads, refreshChatNames, threadRef } from './feishu-loops.ts'
 const MembersSchema = z.looseObject({
   users: z.array(z.looseObject({ member_id: z.string(), name: z.string() })),

@@ -1,7 +1,7 @@
 /** Proactive candidate assessment for the main Session: relays candidate cards, serves bounded context reads, and records outcomes. */
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { z } from 'zod'
-import { reasonText, threadKey, type Assessor, type AssessmentOutcome, type Candidate, type EngineForMainSession,
+import { reasonText, threadKey, type Assessor, type AssessmentOutcome, type Candidate, type Decision, type EngineForMainSession,
   type Trigger } from '../core/index.ts'
 import { AdmissionDirectionSchema, RuleAssessmentSchema, assessmentOutcome, directionAllowed, type Settings } from '../policy.ts'
 import { checkedImText } from '../infra/text.ts'
@@ -15,6 +15,16 @@ import { textPage } from './context.ts'
 import { AcknowledgementSchema } from './tools/tool.ts'
 import type { Effects } from './effects.ts'
 
+/** The latest Decisions on a candidate's Thread, when it has any: `would_accept` marks an observe-mode acceptance. */
+function threadDecisions(decisions: readonly Decision[] | undefined) {
+  if (!decisions?.length) return {}
+  return { thread_decisions: decisions.map(decision => {
+    const audit = decision.audit as { would_accept?: unknown; proposal?: { title?: unknown } } | undefined
+    const title = typeof audit?.proposal?.title === 'string' ? audit.proposal.title : undefined
+    return { at: decision.at, kind: decision.kind, reason: reasonText(decision.reason),
+      ...audit?.would_accept === true ? { would_accept: true } : {}, ...title ? { title } : {} }
+  }) }
+}
 /** Schema for a short lowercase kebab-case English ticket worktree name (1–4 words, at most 32 characters). */
 export const WorktreeNameSchema = z.string().max(32).regex(/^[a-z]+(?:-[a-z0-9]+){0,3}$/, 'Use 1–4 short English words in lowercase kebab-case, at most 32 characters').describe('Meaningful short English ticket name, e.g. fix-plan-color. Translate Chinese titles into English; no Chinese, pinyin or generic ticket names. 1–4 lowercase words in kebab-case, at most 32 characters.')
 /** Schema for the main Session's proactive candidate assessment decision (`orchestrator_eval_decide`). */
@@ -215,7 +225,7 @@ export class MasterAssessor implements Assessor {
         return { trigger_id: item.id, actor: item.actor.id, at: item.at, ...text, ...'chars' in text ? { read: `trigger/${item.id}` } : {} }
       }) } : {},
       // The rules are in the main Session's Policy section, which names the version the candidate's Eval was built from.
-      ...relatedTickets(candidate.tickets), policy_version: candidate.policyVersion,
+      ...relatedTickets(candidate.tickets), ...threadDecisions(candidate.decisions), policy_version: candidate.policyVersion,
       thread }
   }
   /**

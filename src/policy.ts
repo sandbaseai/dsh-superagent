@@ -6,7 +6,7 @@ import { LIMITS } from './limits.ts'
 import { z } from 'zod'
 import { ADMISSION_DEFAULTS, type Admission, type AdmissionCell, type AdmissionRow } from './admission.ts'
 import { key, type AssessmentOutcome, type Mandate, type Policy, type PolicyEffect, type SourceScope, type Strength, type Thread, type Ticket,
-  type Trigger, type ActorRef, type GateResult } from './core/index.ts'
+  type Trigger, type ActorRef, type GateResult, liveTicket } from './core/index.ts'
 import { sameName } from './infra/text.ts'
 import { WORKER_COMMANDS } from './infra/environment.ts'
 
@@ -168,7 +168,7 @@ export function settingsPolicy(settings: Settings, sources: SourceScope): Policy
   const version = policyVersion(settings)
   const mode = settings.eval.mode
   /** Gate non-human triggers: only listed bots (as inferred candidates) and senderless system/CI events may pass; other bots are rejected. */
-  const machineGate = (trigger: Trigger): GateResult => {
+  const machineGate = (trigger: Trigger, tickets: Ticket[]): GateResult => {
     const bot = trigger.actor.id ? listedBot(settings, trigger.actor) : undefined
     if (trigger.actor.id && !bot) return { admissible: false, reason: 'not_human' }
     const scope = listened(sources, trigger.source, trigger.meta)
@@ -177,6 +177,12 @@ export function settingsPolicy(settings: Settings, sources: SourceScope): Policy
     const addressed = trigger.addressed ? { addressed: trigger.addressed } : {}
     if (bot) {
       if (mode === 'off') return { admissible: false, reason: 'admission_ignored' }
+      // An alert's recovery notice, and a repeat while a ticket on its alert Thread is open, need no assessment.
+      const alert = trigger.meta.alert
+      if (alert && typeof alert === 'object' && typeof (alert as { status?: unknown }).status === 'string') {
+        if ((alert as { status: string }).status === 'recovered') return { admissible: false, reason: 'alert_recovered' }
+        if (tickets.some(liveTicket)) return { admissible: false, reason: 'alert_repeat' }
+      }
       const basis = { ...recorded, via: 'bot' as const, sender: senderName(bot), ...addressed, observation: { mode } }
       return { admissible: true, strength: 'inferred', basis }
     }
@@ -189,7 +195,7 @@ export function settingsPolicy(settings: Settings, sources: SourceScope): Policy
   return {
     version, paused: settings.paused, evalTimeoutMs: settings.eval.timeoutSeconds * 1000,
     gate(trigger: Trigger, thread, tickets) {
-      if (!trigger.human) return machineGate(trigger)
+      if (!trigger.human) return machineGate(trigger, tickets)
       const allowed = allowedSender(settings, trigger.actor)
       const scope = listened(sources, trigger.source, trigger.meta)
       const row = scope.listened ? scope.row : undefined

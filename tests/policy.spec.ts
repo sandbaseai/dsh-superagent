@@ -461,6 +461,22 @@ describe('bots and events without a sender', () => {
     const unobserved = setup(settings).policy.gate({ ...alert, meta: { chatId: CHAT, direct: false, mentioned: false } }, thread(), [])
     expect(unobserved).toEqual({ admissible: false, reason: 'not_human' })
   })
+  it('ignores a listed bot\'s alert recovery, and its repeat while a ticket on the alert Thread is open', () => {
+    const settings = SettingsSchema.parse({ ...base, policy: { ...base.policy, sources: { ...base.policy.sources,
+      feishu: { ...base.policy.sources.feishu, bots: [{ id: 'cli_alerts', name: 'Alerts' }] } } } })
+    const notice = (status: string) => unaddressed({ actor: { source: 'feishu', id: 'cli_alerts' }, human: false,
+      meta: { chatId: OBSERVED, direct: false, mentioned: false, alert: { kind: 'prometheus', status, policy: 'p', object: 'o', key: 'k' } } })
+    const { policy } = setup(settings)
+    expect(policy.gate(notice('recovered'), thread(), [])).toEqual({ admissible: false, reason: 'alert_recovered' })
+    expect(policy.gate(notice('firing'), thread(['live']), [{ id: 'live' } as Ticket])).toEqual({ admissible: false, reason: 'alert_repeat' })
+    // An ended ticket or none leaves the bot basis unchanged.
+    for (const tickets of [[], [ticket]]) {
+      expect(policy.gate(notice('firing'), thread(), tickets)).toMatchObject({ admissible: true, strength: 'inferred', basis: { via: 'bot' } })
+    }
+    // A bot not on the list is still not admitted, whatever its notice says.
+    expect(policy.gate({ ...notice('recovered'), actor: { source: 'feishu', id: 'cli_other' } }, thread(), [])).toEqual({ admissible: false,
+      reason: 'not_human' })
+  })
   it('says on the GitHub bot list when a listed bot\'s comment is received: when it mentions the agent, or comments are observed', () => {
     const field = githubKind.policy!.fields.find(item => item.key === 'bots')!
     const comments = githubKind.fields.find(item => item.key === 'observeComments')!.label

@@ -72,10 +72,20 @@ async function readBody(req: IncomingMessage, maxBytes = 128 * 1024): Promise<un
 function json(res: ServerResponse, status: number, value: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); res.end(JSON.stringify(value))
 }
-export function sameOrigin(req: Pick<IncomingMessage, 'headers'>, port: number): boolean {
-  const host = req.headers.host
-  if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) return false
-  return req.headers['x-orchestrator-request'] === '1' && (req.headers.origin === undefined || req.headers.origin === `http://${host}`)
+/**
+ * A management request from this panel: the loopback listener's own Host, or a `trustedHosts` authority a reverse proxy
+ * forwards (an entry without a port matches any port), with the panel's marker header and no foreign Origin. Behind a
+ * proxy the Origin may be https while the hop to this listener is plain http.
+ */
+export function sameOrigin(req: Pick<IncomingMessage, 'headers'>, port: number, trustedHosts: readonly string[] = []): boolean {
+  const host = req.headers.host?.toLowerCase()
+  if (!host) return false
+  const loopback = host === `127.0.0.1:${port}` || host === `localhost:${port}`
+  const trusted = !loopback && trustedHosts.some(entry => { const e = entry.toLowerCase(); return e === host || (!e.includes(':') && host.split(':')[0] === e) })
+  if (!loopback && !trusted) return false
+  if (req.headers['x-orchestrator-request'] !== '1') return false
+  const origin = req.headers.origin
+  return origin === undefined || origin === `http://${host}` || (trusted && origin === `https://${host}`)
 }
 /** Maps errors to HTTP status codes and structured payloads that the panel localizes in the interface language. */
 function failure(error: unknown): [number, Record<string, unknown>] {
@@ -98,7 +108,7 @@ function setupView(runtime: HttpHost) {
   const resolved = runtime.configured() ? runtime.deployment : undefined
   return {
     machine: machineView(runtime.machine), problem: runtime.setupProblem ?? null, feishuProblem: runtime.feishuProblem ?? null,
-    accounts: resolved ? { repository: resolved.repository, agent: resolved.github.login, feishu: resolved.feishu ? { appId: resolved.feishu.appId, brand: resolved.feishu.brand, botId: resolved.feishu.botId, name: resolved.feishu.name } : null } : null,
+    accounts: resolved ? { repository: resolved.repository, agent: resolved.github?.login ?? null, feishu: resolved.feishu ? { appId: resolved.feishu.appId, brand: resolved.feishu.brand, botId: resolved.feishu.botId, name: resolved.feishu.name } : null } : null,
   }
 }
 /** Build the `/orchestrator/api/state` response consumed by the management panel and `scripts/dsh-superagent status` (`docs/006-deployment.md`). */
@@ -234,7 +244,7 @@ export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
     ctx.webServer.register({ kind: 'prefix', path: '/orchestrator', handler: async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://localhost')
       if (!url.pathname.startsWith('/orchestrator/api/')) { res.writeHead(404); res.end(); return }
-      if (!sameOrigin(req, ctx.webServer.port)) { json(res, 403, { error: 'Same-origin management request required' }); return }
+      if (!sameOrigin(req, ctx.webServer.port, runtime.machine.trustedHosts.get())) { json(res, 403, { error: 'Same-origin management request required' }); return }
       try {
         await runtime.ready
         const route = match(table, req.method ?? 'GET', url.pathname.slice('/orchestrator/api/'.length).split('/'))

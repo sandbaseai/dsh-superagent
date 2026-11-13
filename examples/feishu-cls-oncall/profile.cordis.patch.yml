@@ -1,0 +1,40 @@
+# Feishu-only, read-only on-call profile. Copy to $DSH_HOME/profiles/<profile>/cordis.patch.yml (replacing that file),
+# replace every <placeholder>, then follow README.zh-CN.md in this directory. Written for @deepseek-ai/dsh 0.2.1-rc.3, whose
+# Web template already mounts @deepseek-ai/dsh-llm-pi-ai as entry `llm-pi-ai` (no routes) and the default model as entry
+# `agent-default-model`; a patch row replaces the `config` of the entry it names. No secret goes into this file: the route's
+# `apiKeyEnv` names the credential, which DeepSeek Harness resolves per request from $DSH_HOME/.credentials.yaml, else from
+# the environment dsh was launched in, else from <launch directory>/.env, else from $DSH_HOME/.env.
+- id: webserver
+  config:
+    host: 127.0.0.1
+    port: 3082
+- id: dsh-superagent
+  config:
+    stateDir: <absolute path, for example /home/oncall/.dsh/state/superagent>
+# No GitHub: the GitHub Source plugin is off, and setup skips GitHub while its Source names no repository or CLI.
+- id: dsh-superagent-github
+  disabled: true
+- id: dsh-superagent-feishu
+  disabled: false
+# The models, as an Anthropic-compatible Messages route of the pi-ai adapter; requests select it as provider
+# `anthropic-gateway`. baseURL is the gateway root without /v1 (the Anthropic SDK appends /v1/messages), and the key is sent
+# as `x-api-key`. Do not name the route `anthropic`: pi-ai would then apply its Anthropic catalog defaults. List both model
+# ids here and pass the same ids to scripts/oncall-apply as --router-model and --worker-model. No secret goes here.
+- id: llm-pi-ai
+  config:
+    providers:
+      anthropic-gateway:
+        displayName: Anthropic-compatible gateway
+        api: anthropic-messages
+        baseURL: <Anthropic-compatible base URL>
+        apiKeyEnv: ONCALL_LLM_API_KEY
+        models:
+          - id: <router model id>
+            name: Router
+          - id: <worker model id>
+            name: Worker
+# The model Sessions start on when no role model is set (the Eval and Execution settings set one for each role).
+- id: agent-default-model
+  config:
+    provider: anthropic-gateway
+    model: <router model id>

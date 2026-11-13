@@ -35,6 +35,8 @@ export interface Candidate {
   policyVersion: string
   /** Every ticket on the thread, including ended ones, for duplicate judgement. */
   tickets: Ticket[]
+  /** The latest Decisions on the thread, oldest first, at most five, for repeat judgement. */
+  decisions?: Decision[]
 }
 
 export type AssessmentOutcome =

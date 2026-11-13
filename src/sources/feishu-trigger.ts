@@ -1,6 +1,7 @@
 /** Normalizes Feishu live events, chat history items, and topic replies into domain Triggers. */
 import { z } from 'zod'
 import { key, type ChannelRef, type Trigger } from '../core/index.ts'
+import { alertThreadId, parseAlert } from './feishu-alert.ts'
 import type { FeishuMessage, FeishuRef } from './feishu-read.ts'
 
 export const SOURCE = 'feishu'
@@ -34,13 +35,18 @@ export function feishuTrigger(input: unknown, botId: string, botAppId: string): 
   const direct = event.chat_type === 'p2p'
   const mentioned = event.mentions.some(mention => mention.id === botId || mention.id === botAppId)
   const thread = feishuThreadId(event.chat_id, event.root_id, event.message_id)
-  return { id: feishuTriggerId(event.message_id), source: SOURCE, threads: [{ source: SOURCE, id: thread }],
+  const text = withMentionNames(event.content, event.mentions)
+  // A bot's alert notice belongs first to the alert Thread of its policy and object, so repeats and recoveries group there.
+  const alert = event.sender_type === 'bot' ? parseAlert(text) : undefined
+  const threads = [...alert ? [{ source: SOURCE, id: alertThreadId(event.chat_id, alert.key) }] : [], { source: SOURCE, id: thread }]
+  return { id: feishuTriggerId(event.message_id), source: SOURCE, threads,
     actor: { source: SOURCE, id: event.sender_id }, human: event.sender_type === 'user',
     ...(direct ? { addressed: 'direct' as const } : mentioned ? { addressed: 'mention' as const } : {}),
-    at: feishuTime(event.create_time), text: withMentionNames(event.content, event.mentions),
+    at: feishuTime(event.create_time), text,
     channel: feishuChannel(event.chat_id, event.message_id, direct), ...(event.message_app_link ? { url: event.message_app_link } : {}),
     meta: { chatId: event.chat_id, messageId: event.message_id, direct, mentioned, ...(event.root_id ? { rootId: event.root_id } : {}),
-      ...(event.parent_id ? { parentId: event.parent_id } : {}), ...(event.thread_id ? { threadId: event.thread_id } : {}) } }
+      ...(event.parent_id ? { parentId: event.parent_id } : {}), ...(event.thread_id ? { threadId: event.thread_id } : {}),
+      ...(alert ? { alert } : {}) } }
 }
 export const feishuParent = (trigger: Trigger): string | undefined =>
   trigger.source === SOURCE && typeof trigger.meta.parentId === 'string' ? feishuTriggerId(trigger.meta.parentId) : undefined
@@ -64,12 +70,32 @@ export type HistoricalMessage = z.infer<typeof HistoricalMessageSchema>
 export const HistoryPageSchema = z.looseObject({
   items: z.array(z.unknown()).default([]), has_more: z.boolean().default(false), page_token: z.string().optional(),
 })
+type Element = { tag?: unknown; text?: unknown; href?: unknown; user_name?: unknown; name?: unknown }
+const isRows = (value: unknown): value is Element[][] =>
+  Array.isArray(value) && value.every(row => Array.isArray(row) && row.every(item => !!item && typeof item === 'object'))
+const str = (value: unknown): string => typeof value === 'string' ? value : ''
+function elementText(element: Element): string {
+  const text = str(element.text)
+  if (element.tag === 'text') return text
+  if (element.tag === 'a') return !text || text === element.href ? text || str(element.href) : `${text}(${str(element.href)})`
+  if (element.tag === 'at') return str(element.user_name) || str(element.name) ? `@${str(element.user_name) || str(element.name)}` : ''
+  return ''
+}
+/** Renders a card or rich-text body (`title` plus rows of `{tag, text, href}` elements) as plain text, or undefined. */
+function richText(content: object): string | undefined {
+  const body = content as { title?: unknown; elements?: unknown; content?: unknown }
+  const rows = isRows(body.elements) ? body.elements : isRows(body.content) ? body.content : undefined
+  if (!rows) return undefined
+  const lines = rows.map(row => row.map(elementText).join(''))
+  return [...(str(body.title) ? [str(body.title)] : []), ...lines].join('\n')
+}
 export function historyText(message: HistoricalMessage): string {
   let content: unknown
   try { content = JSON.parse(message.body?.content ?? '') }
   catch { content = message.body?.content ?? '' /* Feishu also returns plain-text system messages. */ }
   const plain = content && typeof content === 'object' && 'text' in content && typeof content.text === 'string' ? content.text : undefined
-  return typeof content === 'string' ? content : plain ?? JSON.stringify(content)
+  if (typeof content === 'string') return content
+  return plain ?? (content && typeof content === 'object' ? richText(content) : undefined) ?? JSON.stringify(content)
 }
 export function historyEvent(message: HistoricalMessage, chatId: string, direct: boolean): unknown {
   return { message_id: message.message_id, chat_id: chatId, chat_type: direct ? 'p2p' : 'group', create_time: message.create_time,

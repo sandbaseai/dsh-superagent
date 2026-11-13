@@ -34,7 +34,8 @@ async function api<T>(messages: ApiMessages, path: string, method: string, body?
   let response: Response
   const json = body === undefined ? {} : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
   try {
-    response = await fetch(`/orchestrator/api/${path}`, { method, ...json, headers: { 'x-orchestrator-request': '1', ...json.headers } })
+    // Relative to the document base, so the panel also works behind a prefix-stripping proxy (DSH web's `--public-url`).
+    response = await fetch(`orchestrator/api/${path}`, { method, ...json, headers: { 'x-orchestrator-request': '1', ...json.headers } })
   } catch {
     throw new ApiError(messages.offline, 0, { unreachable: true })
   }

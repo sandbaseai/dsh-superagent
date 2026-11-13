@@ -20,6 +20,8 @@ export const Config = s.object({
     .description('Pages of thread context one assessment may read.').volatile(),
   admissionContextTimeoutMs: s.number().min(LIMITS.admissionContextTimeoutMs.min).max(LIMITS.admissionContextTimeoutMs.max).step(1)
     .default(15000).description('Time limit of one context read during an assessment, in milliseconds.').volatile(),
+  trustedHosts: s.array(s.string().pattern(/^[A-Za-z0-9.-]+(:\d{1,5})?$/)).default([])
+    .description('Extra Host authorities (host or host:port) the management API accepts, for a reverse proxy in front of the loopback Web server. The proxy must authenticate requests: the management API itself does not.').volatile(),
 })
 export type DeploymentConfig = ReturnType<typeof Config>
 export interface Machine {
@@ -27,6 +29,7 @@ export interface Machine {
   promptMaxChars: Volatile<number>
   admissionContextMaxPages: Volatile<number>
   admissionContextTimeoutMs: Volatile<number>
+  trustedHosts: Volatile<string[]>
 }
 const MOVED: Record<string, string> = {
   repository: 'on the GitHub Source', branchPrefix: 'in the prepare command of the Execution settings', github: 'on the GitHub Source',
@@ -38,8 +41,8 @@ const MOVED: Record<string, string> = {
 export function machineOf(config: DeploymentConfig): Machine {
   const unknown = Object.keys(config).filter(key => !(key in (Config.dict ?? {})))
   if (unknown.length) throw new Error(`dsh-superagent configuration has keys it does not use: ${unknown.map(key => MOVED[key] ? `${key} (now ${MOVED[key]})` : key).join(', ')}; docs/006-deployment.md lists the keys`)
-  const { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs } = config
-  return { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }
+  const { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs, trustedHosts } = config
+  return { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs, trustedHosts }
 }
 
 export const GithubAccountsSchema = z.object({
@@ -52,7 +55,7 @@ export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { githu
 
 export interface Deployment extends Machine {
   repository: string
-  github: { cli: string; login: string; noreply: string }
+  github?: { cli: string; login: string; noreply: string }
   feishu?: FeishuBot
 }
 export interface FeishuBot { cli: string; appId: string; brand: 'feishu' | 'lark'; botId: string; name: string }
@@ -83,10 +86,14 @@ function parsed<T>(schema: z.ZodType<T>, text: string): T | undefined {
   const result = schema.safeParse(value)
   return result.success ? result.data : undefined
 }
-/** Verify the agent's GitHub CLI identity and push access to the configured repository. */
+/**
+ * Verify the agent's GitHub CLI identity and push access to the configured repository or, when the GitHub Source names
+ * neither a repository nor a CLI, a deployment without GitHub.
+ */
 export async function resolveDeployment(machine: Machine, github: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<Deployment> {
   const { stateDir } = machine
   const accounts = GithubAccountsSchema.parse(github ?? {})
+  if (!accounts.repository && !accounts.cli) return { ...machine, repository: '' }
   const remote = accounts.repository
   if (!remote) throw new SetupError('repositoryUnset')
   if (!accounts.cli) throw new SetupError('agentCliUnset')

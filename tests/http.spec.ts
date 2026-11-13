@@ -10,10 +10,10 @@ import { SetupError } from '../src/setup.ts'
 type Handler = (req: unknown, res: unknown) => Promise<void>
 type Headers = Record<string, string | undefined>
 /** Mount management HTTP routes on a fake web server and return a request helper that includes default panel headers. */
-function serve(runtime: Partial<Record<keyof HttpHost, unknown>>, host = '127.0.0.1') {
+function serve(runtime: Partial<Record<keyof HttpHost, unknown>>, host = '127.0.0.1', trustedHosts: string[] = []) {
   let handler: Handler = async () => {}
   const ctx = { webServer: { host, port: 3082, register: (route: { handler: Handler }) => { handler = route.handler; return () => {} } } }
-  registerHttp(ctx as never, { ready: Promise.resolve(), ...runtime } as unknown as HttpHost)
+  registerHttp(ctx as never, { ready: Promise.resolve(), ...runtime, machine: { trustedHosts: { get: () => trustedHosts } as never, ...(runtime.machine as object) } } as unknown as HttpHost)
   return async (method: string, path: string, body?: unknown, headers: Headers = {}) => {
     let status = 0, text = ''
     const chunks = body === undefined ? [] : [Buffer.from(typeof body === 'string' ? body : JSON.stringify(body))]
@@ -78,6 +78,24 @@ it('answers only a same-origin request from the panel on the loopback address', 
   expect(await post({ host: 'localhost:3082', origin: 'http://localhost:3082' })).toMatchObject({ status: 200 })
   // Management routes require a loopback Web server.
   expect(() => serve({}, '0.0.0.0')).toThrow('Orchestrator management requires a loopback Web server')
+})
+
+it('answers a panel request a trusted reverse proxy forwards, and still refuses other hosts and origins', async () => {
+  const runtime = { sessions: { delivery: async () => 'injected' }, engine: { unsubscribe: () => true } }
+  const post = (call: ReturnType<typeof serve>, headers: Headers) => call('POST', 'threads/github%3A1/unsubscribe', undefined, headers)
+  const call = serve(runtime, '127.0.0.1', ['ops.example.com'])
+  const proxied = { host: 'ops.example.com' }
+  expect((await post(call, proxied)).status).toBe(200)
+  // Behind an HTTPS proxy the page origin is https even though the hop to this listener is plain http.
+  expect((await post(call, { ...proxied, origin: 'https://ops.example.com' })).status).toBe(200)
+  // A port-less entry matches the host on any port.
+  expect((await post(call, { host: 'ops.example.com:8443' })).status).toBe(200)
+  for (const headers of [{ ...proxied, origin: 'https://evil.example' }, { ...proxied, 'x-orchestrator-request': undefined },
+    { host: 'evil.example' }, { host: '127.0.0.1:3082', origin: 'https://127.0.0.1:3082' }]) {
+    expect((await post(call, headers)).status, JSON.stringify(headers)).toBe(403)
+  }
+  // Without the entry the same forwarded request is refused.
+  expect((await post(serve(runtime), proxied)).status).toBe(403)
 })
 
 it('answers a prompt save that lost a race with 409, and a settings body over 128 KiB with 400', async () => {

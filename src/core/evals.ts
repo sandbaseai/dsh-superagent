@@ -17,6 +17,22 @@ const reasonOf = (reason: string | Reason): Reason[] => [typeof reason === 'stri
 const stronger = (a: Strength, b: Strength): Strength => a === 'explicit' || b === 'explicit' ? 'explicit' : 'inferred'
 /** How many times in a row an expired Eval queues its Triggers again before it is recorded unavailable. */
 const REQUEUES = 2
+/** How many of a Thread's latest Decisions a candidate carries. */
+const RECENT_DECISIONS = 5
+/** How far back a candidate keeps the newest accept or would-accept on its Thread beyond the latest Decisions. */
+export const ACCEPT_RECALL_MS = 6 * 3600_000
+/**
+ * A Thread's Decisions an assessor sees, oldest first: the latest few, plus the newest accept or observe-mode would-accept
+ * within `ACCEPT_RECALL_MS` when later ignores pushed it out. In observe mode that would-accept is the only record that
+ * an alert was already judged worth working on, so a rule that skips repeats must still see it after periodic repeats.
+ */
+export function recentDecisions(decisions: readonly Decision[], now: string): Decision[] {
+  const latest = decisions.slice(-RECENT_DECISIONS)
+  const since = Date.parse(now) - ACCEPT_RECALL_MS
+  const accepted = (decision: Decision) => decision.kind === 'accept' || decision.audit?.would_accept === true
+  const kept = decisions.slice(0, -RECENT_DECISIONS).findLast(decision => accepted(decision) && Date.parse(decision.at) >= since)
+  return kept ? [kept, ...latest] : latest
+}
 
 /**
  * Evals runs the Evals of Threads: it batches a Thread's queued Triggers into one Eval, takes its strength, actor, and basis
@@ -238,7 +254,8 @@ export class Evals extends EnginePart {
     const evaluation = thread.evaluating!
     const triggers = evaluation.triggerIds.flatMap(id => { const trigger = this.repo.triggers.get(id); return trigger ? [trigger] : [] })
     const { id: evalId, strength, policyVersion } = evaluation
-    return { evalId, thread, triggers, strength, policyVersion, tickets: this.ticketsOnThread(thread) }
+    return { evalId, thread, triggers, strength, policyVersion, tickets: this.ticketsOnThread(thread),
+      decisions: recentDecisions(this.repo.decisions.byThread(thread.key), this.now()) }
   }
   /**
    * Record that the queued Triggers `ids` of a Thread start no Eval, for `reason`, and take them out of its queue. Its id
