@@ -130,6 +130,7 @@ lark-bot api GET /open-apis/im/v1/messages \
 ```sh
 mkdir -p ~/.config/dsh-oncall && chmod 700 ~/.config/dsh-oncall
 cat > ~/.config/dsh-oncall/prod-a.env <<'EOF'
+DESCRIPTION=生产，新加坡；Prometheus 组 example_alerts_*
 CLS_SECRET_ID=<只读子用户的 SecretId>
 CLS_SECRET_KEY=<只读子用户的 SecretKey>
 CLS_REGION=ap-singapore
@@ -153,7 +154,7 @@ chmod 600 ~/.config/dsh-oncall/prod-a.env
 dsh-oncall envs
 ```
 
-`dsh-oncall envs` 只列环境名和可用工具（`cls`、`monitor`、`prom`、`kube`、`grafana`），不输出任何值；`prom` 在 `PROM_URL`+`PROM_TOKEN` 或 `GRAFANA_BASE_URL`+`GRAFANA_TOKEN`+`GRAFANA_PROM_UID` 齐全时才列出。`CLS_ENDPOINT`、`MONITOR_ENDPOINT` 必须是带 `https://` 的地址（只写主机名会被拒绝）。`GRAFANA_BASE_URL`、`PROM_URL` 和它们一样，只有 `127.0.0.1`、`localhost` 能用 `http://`，其他地址必须用 `https://`。`kube` 拒绝会读写本地文件的参数，比如 `-o go-template-file=…`、`--template`、`--profile-output`、`--cache-dir`；模板请直接写在 `-o go-template=…` 或 `-o jsonpath=…` 里。DSH 会从 worker 的 shell 里去掉名字含 KEY、SECRET、TOKEN、PASSWORD 的环境变量，所以凭据只能放文件里。`monitor` 只允许 `GetMonitorData`（最多 24 小时、`Period` 至少 60 秒）、`DescribeAlarmHistories`（最多 7 天、每页最多 100 条）、`DescribeBaseMetrics`、`DescribeAlarmPolicies`；`prom range` 最多 24 小时，`series`、`labels`、`label-values` 最多 6 小时。`dsh-oncall` 也认 `DSH_ONCALL_CONFIG_DIR`，但 DSH 0.2.1-rc.3 不把它传给 worker 的 shell（本地验证时确认），所以服务账号的 `~/.config/dsh-oncall` 是 worker 唯一能用的位置。
+`dsh-oncall envs` 列出环境名、可用工具（`cls`、`monitor`、`prom`、`kube`、`grafana`），以及帮 worker 判断告警属于哪个环境的信息：`DESCRIPTION`、CLS 和云监控的地域、`CLS_TOPICS` 里的主题名（不含主题 id）、kube 命名空间；凭据、主题 id 和地址都不输出。环境名不直观时，在 `DESCRIPTION` 里写清它对应的地域、Prometheus 组或服务；`prom` 在 `PROM_URL`+`PROM_TOKEN` 或 `GRAFANA_BASE_URL`+`GRAFANA_TOKEN`+`GRAFANA_PROM_UID` 齐全时才列出。`CLS_ENDPOINT`、`MONITOR_ENDPOINT` 必须是带 `https://` 的地址（只写主机名会被拒绝）。`GRAFANA_BASE_URL`、`PROM_URL` 和它们一样，只有 `127.0.0.1`、`localhost` 能用 `http://`，其他地址必须用 `https://`。`kube` 拒绝会读写本地文件的参数，比如 `-o go-template-file=…`、`--template`、`--profile-output`、`--cache-dir`；模板请直接写在 `-o go-template=…` 或 `-o jsonpath=…` 里。DSH 会从 worker 的 shell 里去掉名字含 KEY、SECRET、TOKEN、PASSWORD 的环境变量，所以凭据只能放文件里。`monitor` 只允许 `GetMonitorData`（最多 24 小时、`Period` 至少 60 秒）、`DescribeAlarmHistories`（最多 7 天、每页最多 100 条）、`DescribeBaseMetrics`、`DescribeAlarmPolicies`；`prom range` 最多 24 小时，`series`、`labels`、`label-values` 最多 6 小时。`dsh-oncall` 也认 `DSH_ONCALL_CONFIG_DIR`，但 DSH 0.2.1-rc.3 不把它传给 worker 的 shell（本地验证时确认），所以服务账号的 `~/.config/dsh-oncall` 是 worker 唯一能用的位置。
 
 ## 模型网关（Anthropic 兼容）
 

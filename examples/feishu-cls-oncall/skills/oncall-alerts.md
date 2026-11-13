@@ -16,7 +16,7 @@ The host ignores recoveries before you see them; if your alert has recovered mea
 
 ## 2. Find the environment
 
-Run `dsh-oncall envs`. It lists each environment's name and its tools (`cls`, `prom`, `monitor`, `kube`, `grafana`), never credentials. Map the alert to an environment (inferred; confirm with `dsh-oncall envs` and the data). Example mapping; replace it with yours:
+Run `dsh-oncall envs`. It lists each environment's name, its tools (`cls`, `prom`, `monitor`, `kube`, `grafana`) and the facts that route an alert to it: the operator's `description`, `clsRegion`, `clsTopics` (topic names), `monitorRegion` and `kubeNamespace`; never credentials, topic ids or endpoints. Match the alert's region, topic or Prometheus group against those facts. Example mapping; replace it with yours, or write it into each environment's `DESCRIPTION`:
 
 - Cloud Monitor `项目|地域`: the region names the environment, for example 新加坡 → `prod-a` (`ap-singapore`).
 - Prometheus groups: a naming convention per environment, for example `example_alerts_*` → `prod-a`, `example_region_b_alerts/*` → `prod-b`.

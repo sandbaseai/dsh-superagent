@@ -84,8 +84,20 @@ it('lists environments with their tool groups and no values', async () => {
   config('test', ['GRAFANA_BASE_URL=https://grafana.example', `GRAFANA_TOKEN=${GRAFANA_TOKEN}`])
   const result = await run(['envs'])
   expect(result.code).toBe(0)
-  expect(JSON.parse(result.stdout).envs).toEqual([{ name: 'prod', tools: ['cls', 'kube', 'grafana'] }, { name: 'test', tools: ['grafana'] }])
+  expect(JSON.parse(result.stdout).envs).toEqual([{ name: 'prod', tools: ['cls', 'kube', 'grafana'], clsRegion: 'ap-singapore', kubeNamespace: 'n' },
+    { name: 'test', tools: ['grafana'] }])
   for (const secret of [SECRET_ID, SECRET_KEY, GRAFANA_TOKEN, 'grafana.example']) expect(result.stdout + result.stderr).not.toContain(secret)
+})
+it('lists the description, regions and topic names that route an alert, never topic ids or endpoints', async () => {
+  config('prod-a', [`CLS_SECRET_ID=${SECRET_ID}`, `CLS_SECRET_KEY=${SECRET_KEY}`, 'CLS_REGION=ap-singapore',
+    'CLS_TOPIC_ID=11111111-0000-4000-8000-000000000001', 'CLS_TOPICS=apiserver=22222222-0000-4000-8000-000000000002,gateway=33333333-0000-4000-8000-000000000003',
+    `MONITOR_SECRET_ID=${SECRET_ID}`, `MONITOR_SECRET_KEY=${SECRET_KEY}`, 'MONITOR_REGION=ap-singapore',
+    'DESCRIPTION=Production, Singapore; Prometheus groups example_alerts_*'])
+  const result = await run(['envs'])
+  expect(JSON.parse(result.stdout).envs).toEqual([{ name: 'prod-a', tools: ['cls', 'monitor'],
+    description: 'Production, Singapore; Prometheus groups example_alerts_*', clsRegion: 'ap-singapore', clsTopics: ['apiserver', 'gateway'],
+    monitorRegion: 'ap-singapore' }])
+  for (const hidden of [SECRET_ID, SECRET_KEY, '11111111', '22222222', '33333333']) expect(result.stdout + result.stderr).not.toContain(hidden)
 })
 
 it('injects the kubeconfig, context and namespace, and -A drops the namespace', async () => {
@@ -342,7 +354,7 @@ it('lists monitor and prom only for complete configurations', async () => {
   config('c', [`MONITOR_SECRET_ID=${SECRET_ID}`, `MONITOR_SECRET_KEY=${SECRET_KEY}`, 'PROM_URL=https://prom.example',
     `CLS_SECRET_ID=${SECRET_ID}`, `CLS_SECRET_KEY=${SECRET_KEY}`, 'CLS_REGION=na-ashburn'])
   const result = await run(['envs'])
-  expect(JSON.parse(result.stdout).envs).toEqual([{ name: 'a', tools: ['monitor', 'prom'] }, { name: 'b', tools: ['grafana', 'prom'] },
-    { name: 'c', tools: ['cls'] }])
+  expect(JSON.parse(result.stdout).envs).toEqual([expect.objectContaining({ name: 'a', tools: ['monitor', 'prom'] }),
+    expect.objectContaining({ name: 'b', tools: ['grafana', 'prom'] }), expect.objectContaining({ name: 'c', tools: ['cls'], clsRegion: 'na-ashburn' })])
   for (const secret of [SECRET_ID, SECRET_KEY, GRAFANA_TOKEN, PROM_TOKEN]) expect(result.stdout + result.stderr).not.toContain(secret)
 })

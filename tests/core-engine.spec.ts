@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import { Engine, MemoryRepositories, UserError, followupOwners, key, runningAssignment, ticketOutcome, ticketStage,
   waitsForPerson } from '../src/core/index.ts'
-import type { Assessor, Assignment, Candidate, EngineOptions, Executor, OutboundMessage, Outcome, Policy, Ticket, Trigger } from '../src/core/index.ts'
+import type { Assessor, Assignment, Candidate, Decision, EngineOptions, Executor, OutboundMessage, Outcome, Policy, Ticket, Trigger } from '../src/core/index.ts'
+import { recentDecisions } from '../src/core/evals.ts'
 
 const member = { source: 'chat', id: 'alice' }
 const guest = { source: 'chat', id: 'guest' }
@@ -1617,5 +1618,26 @@ describe('ignores from the card', () => {
     // Accepting an inferred candidate still takes an assessment's matched rules.
     h.engine.receive(trigger('5', { actor: guest })); h.engine.reevaluate('5'); h.pump()
     expect(() => h.engine.decide('5', { kind: 'accept', title: 'Fix', scope: 'small', reason: 'chat' })).toThrow(new UserError('notExplicit'))
+  })
+})
+
+describe('recentDecisions', () => {
+  const at = (minutes: number) => new Date(Date.parse('2026-11-12T10:00:00Z') + minutes * 60_000).toISOString()
+  const decision = (id: string, minutes: number, kind: Decision['kind'], audit?: Record<string, unknown>): Decision =>
+    ({ id, evalId: id, threadKey: 't', triggerIds: [id], policyVersion: 'v', at: at(minutes), kind, reason: [], strength: 'inferred', ...audit ? { audit } : {} })
+  const ignores = (from: number, count: number) => Array.from({ length: count }, (_, i) => decision(`i${from + i}`, from + i, 'ignore'))
+  it('keeps the newest would-accept within six hours after later ignores pushed it out of the latest five', () => {
+    const wouldAccept = decision('w', 0, 'ignore', { would_accept: true })
+    const list = [decision('a-old', -400, 'accept'), wouldAccept, ...ignores(10, 6)]
+    expect(recentDecisions(list, at(60)).map(d => d.id)).toEqual(['w', 'i11', 'i12', 'i13', 'i14', 'i15'])
+  })
+  it('keeps an accept the same way, and drops one older than six hours', () => {
+    expect(recentDecisions([decision('a', 0, 'accept'), ...ignores(10, 5)], at(359)).map(d => d.id)[0]).toBe('a')
+    expect(recentDecisions([decision('a', 0, 'accept'), ...ignores(10, 6)], at(361)).map(d => d.id)).toEqual(['i11', 'i12', 'i13', 'i14', 'i15'])
+  })
+  it('adds nothing when the latest five already hold the accept, or there are five or fewer', () => {
+    const list = [...ignores(0, 3), decision('a', 5, 'accept'), ...ignores(6, 3)]
+    expect(recentDecisions(list, at(60)).map(d => d.id)).toEqual(['i2', 'a', 'i6', 'i7', 'i8'])
+    expect(recentDecisions(ignores(0, 2), at(10)).map(d => d.id)).toEqual(['i0', 'i1'])
   })
 })

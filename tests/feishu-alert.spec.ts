@@ -53,6 +53,12 @@ describe('parseAlert', () => {
     expect(alert(ttftOpus)!.object).toContain('anthropic/claude-opus-5.5')
     expect(alert(ttftOpus)!.object).not.toContain('74.85')
   })
+  it('keys CLS alarms on the region, so one policy and topic in two regions are two alarms', () => {
+    const other = historyText(clsAlert).replace('地域：新加坡（ap-singapore）', '地域：弗吉尼亚（na-ashburn）')
+    const otherRecovery = historyText(clsRecovery).replace('地域：新加坡（ap-singapore）', '地域：弗吉尼亚（na-ashburn）')
+    expect(parseAlert(other)!.key).not.toBe(alert(clsAlert)!.key)
+    expect(parseAlert(other)!.key).toBe(parseAlert(otherRecovery)!.key)
+  })
   it('keys Cloud Monitor alarms on the instance and the alarm content', () => {
     const cpu = historyText(mysqlOngoing).replace('内存利用率 > 90%', 'CPU利用率 > 80%')
     expect(parseAlert(cpu)!.object).toBe('cdb-test0001')

@@ -28,7 +28,7 @@ import urllib.parse
 import urllib.request
 
 ENV_NAME = re.compile(r'^[a-z0-9][a-z0-9-]{0,30}$')
-KNOWN_KEYS = {'CLS_SECRET_ID', 'CLS_SECRET_KEY', 'CLS_REGION', 'CLS_TOPIC_ID', 'CLS_TOPICS', 'CLS_ENDPOINT', 'KUBECONFIG',
+KNOWN_KEYS = {'DESCRIPTION', 'CLS_SECRET_ID', 'CLS_SECRET_KEY', 'CLS_REGION', 'CLS_TOPIC_ID', 'CLS_TOPICS', 'CLS_ENDPOINT', 'KUBECONFIG',
               'KUBE_CONTEXT', 'KUBE_NAMESPACE', 'KUBECTL', 'GRAFANA_BASE_URL', 'GRAFANA_TOKEN', 'MONITOR_SECRET_ID',
               'MONITOR_SECRET_KEY', 'MONITOR_REGION', 'MONITOR_ENDPOINT', 'PROM_URL', 'PROM_USER', 'PROM_TOKEN', 'GRAFANA_PROM_UID'}
 SECRET_KEYS = ('CLS_SECRET_ID', 'CLS_SECRET_KEY', 'GRAFANA_TOKEN', 'MONITOR_SECRET_ID', 'MONITOR_SECRET_KEY', 'PROM_TOKEN')
@@ -179,8 +179,26 @@ def parse_json(text):
 
 # ---- envs ----
 
+def routing(values):
+    """The non-secret facts that tell which environment an alert belongs to: the operator's description, the CLS and
+    Cloud Monitor regions, the names of the CLS topics (not their ids) and the kube namespace."""
+    facts = {}
+    if values.get('DESCRIPTION'):
+        facts['description'] = cut(values['DESCRIPTION'], 300)[0]
+    if values.get('CLS_REGION'):
+        facts['clsRegion'] = values['CLS_REGION']
+    topics = [pair.split('=', 1)[0].strip() for pair in (values.get('CLS_TOPICS') or '').split(',') if '=' in pair]
+    if topics:
+        facts['clsTopics'] = [topic for topic in topics if topic]
+    if values.get('MONITOR_REGION'):
+        facts['monitorRegion'] = values['MONITOR_REGION']
+    if values.get('KUBE_NAMESPACE'):
+        facts['kubeNamespace'] = values['KUBE_NAMESPACE']
+    return facts
+
+
 def command_envs(_args):
-    """List the configured environments and their tool groups, never their values."""
+    """List the configured environments, their tool groups and routing facts, never credentials, topic ids or endpoints."""
     directory = config_dir()
     envs = []
     if directory.is_dir():
@@ -196,7 +214,7 @@ def command_envs(_args):
             tools = [group for group, keys in GROUPS.items() if all(values.get(k) for k in keys)]
             if any(all(values.get(k) for k in keys) for keys in PROM_GROUPS):
                 tools.append('prom')
-            envs.append({'name': name, 'tools': tools})
+            envs.append({'name': name, 'tools': tools, **routing(values)})
     emit({'configDir': str(directory), 'envs': envs})
     return 0
 

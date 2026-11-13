@@ -69,7 +69,9 @@ export function parseAlert(text: string): FeishuAlert | undefined {
   }
   const notice = field(lines, '通知类型')
   if (notice !== undefined && field(lines, '告警策略')) {
-    return build('cls', { status: notice.includes('恢复') ? 'recovered' : 'firing' }, field(lines, '告警策略'), field(lines, '日志主题'))
+    // One policy and topic name can exist in several regions, so the region keys the alarm too.
+    return build('cls', { status: notice.includes('恢复') ? 'recovered' : 'firing' }, field(lines, '告警策略'), field(lines, '日志主题'),
+      field(lines, '地域') ?? '')
   }
   return undefined
 }
