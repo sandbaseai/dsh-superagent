@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""Deploy a commit of this checkout to the running dsh-superagent service, and roll back if it does not come up healthy.
+
+Steps: check the checkout is clean, fetch, require the target commit to be on the deploy branch (default origin/main),
+check it out and build it while the service keeps running; back up the database; restart through
+scripts/dsh-superagent and require exit 0. If the build fails, the previous commit is checked out and rebuilt and the
+service is never stopped. If the restart fails, the previous commit is rebuilt, the database restored and the service
+restarted. Each run appends one line to the deploy log.
+
+Exit 0 deployed (or nothing to do), 1 failed and rolled back, 2 refused before any change, 3 failed and the rollback
+failed too: a person must act.
+"""
+
+import argparse
+import datetime
+import os
+from pathlib import Path
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+
+ROOT = Path(__file__).resolve().parent.parent
+SERVICE = ROOT / 'scripts' / 'dsh-superagent'
+KEEP_BACKUPS = 10
+
+
+class Refused(Exception):
+    """A precondition failed before anything changed."""
+
+
+def run(*argv, check=True, quiet=False):
+    """Run a command in the checkout and return its stdout; a failure raises with its output."""
+    result = subprocess.run(argv, cwd=ROOT, capture_output=True, text=True)
+    if not quiet and result.stdout.strip():
+        print(result.stdout.rstrip())
+    if check and result.returncode != 0:
+        raise RuntimeError(f'{" ".join(argv)} exited {result.returncode}: {(result.stderr or result.stdout).strip()[-2000:]}')
+    return result
+
+
+def git(*args):
+    return run('git', *args, quiet=True).stdout.strip()
+
+
+def log_line(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('a') as out:
+        out.write(f'{datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")} {text}\n')
+    print(f'logged: {text}')
+
+
+def build():
+    print('== pnpm install && pnpm build')
+    run('pnpm', 'install', '--frozen-lockfile', quiet=True)
+    run('pnpm', 'build', quiet=True)
+
+
+def backup(database, directory, commit):
+    """Copy the database with SQLite's online backup, and keep the newest KEEP_BACKUPS copies."""
+    if not database.exists():
+        print(f'no database at {database}; nothing to back up')
+        return None
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    target = directory / f'orchestrator-{stamp}-{commit}.sqlite'
+    with sqlite3.connect(f'file:{database}?mode=ro', uri=True) as source, sqlite3.connect(target) as copy:
+        source.backup(copy)
+    target.chmod(0o600)
+    for old in sorted(directory.glob('orchestrator-*.sqlite'))[:-KEEP_BACKUPS]:
+        old.unlink()
+    print(f'database backed up to {target}')
+    return target
+
+
+def service(action, args):
+    print(f'== dsh-superagent {action}')
+    result = run(sys.executable, str(SERVICE), action, '--profile', args.profile, '--url', args.url,
+                 '--timeout', str(args.timeout), check=False)
+    return result.returncode
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('commit', nargs='?', help='commit, tag or branch to deploy (default: the tip of --branch)')
+    parser.add_argument('--branch', default='origin/main', help='the target must be contained in this ref (default origin/main)')
+    parser.add_argument('--profile', default=os.environ.get('DSH_SUPERAGENT_PROFILE') or 'superagent')
+    parser.add_argument('--url', default=os.environ.get('DSH_SUPERAGENT_URL') or 'http://127.0.0.1:3082')
+    parser.add_argument('--state-dir', type=Path, required=True, help="the plugin's stateDir, which holds orchestrator.sqlite")
+    parser.add_argument('--backup-dir', type=Path, help='where database backups go (default <state-dir>/../backups)')
+    parser.add_argument('--log', type=Path, default=Path.home() / 'deploy.log', help='deploy log (default ~/deploy.log)')
+    parser.add_argument('--timeout', type=float, default=120, help='startup health-check timeout in seconds')
+    parser.add_argument('--dry-run', action='store_true', help='print what would be deployed and change nothing')
+    args = parser.parse_args()
+    if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', args.profile):
+        parser.error('--profile must be a DSH profile name')
+    database = args.state_dir / 'orchestrator.sqlite'
+    backups = args.backup_dir or args.state_dir.parent / 'backups'
+
+    try:
+        if git('status', '--porcelain', '--untracked-files=no'):
+            raise Refused('the checkout has uncommitted changes; commit or discard them first')
+        git('fetch', '--quiet', 'origin')
+        previous = git('rev-parse', 'HEAD')
+        try:
+            target = git('rev-parse', '--verify', f'{args.commit or args.branch}^{{commit}}')
+        except RuntimeError:
+            raise Refused(f'unknown commit {args.commit or args.branch}') from None
+        if run('git', 'merge-base', '--is-ancestor', target, args.branch, check=False, quiet=True).returncode != 0:
+            raise Refused(f'{target[:7]} is not on {args.branch}; deploy only commits that were merged there')
+    except Refused as error:
+        print(f'refused: {error}', file=sys.stderr)
+        return 2
+
+    short = lambda sha: git('log', '-1', '--format=%h %s', sha)[:72]
+    print(f'current: {short(previous)}')
+    print(f'target:  {short(target)}')
+    if target == previous:
+        print('already deployed; nothing to do')
+        return 0
+    print(git('log', '--oneline', f'{previous}..{target}') or '(target is older than the current commit: a rollback)')
+    if args.dry_run:
+        print('dry run: nothing changed')
+        return 0
+
+    # Build the target while the service keeps running the previous build. A failed build never stops the service.
+    try:
+        git('checkout', '--quiet', '--detach', target)
+        build()
+    except RuntimeError as error:
+        print(f'build failed: {error}', file=sys.stderr)
+        try:
+            git('checkout', '--quiet', '--detach', previous)
+            build()
+        except RuntimeError as again:
+            log_line(args.log, f'{target[:7]} FAILED build; restoring {previous[:7]} failed too: {again}')
+            return 3
+        log_line(args.log, f'{target[:7]} FAILED build; kept {previous[:7]} running')
+        return 1
+
+    saved = backup(database, backups, previous[:7])
+    code = service('restart', args)
+    if code == 0:
+        log_line(args.log, f'{short(target)} deployed (was {previous[:7]})')
+        return 0
+
+    print(f'restart exited {code}; rolling back to {previous[:7]}', file=sys.stderr)
+    try:
+        service('stop', args)
+        git('checkout', '--quiet', '--detach', previous)
+        build()
+        if saved:
+            shutil.copy2(saved, database)
+            for suffix in ('-wal', '-shm'):
+                Path(f'{database}{suffix}').unlink(missing_ok=True)
+            print(f'database restored from {saved}')
+        back = service('start', args)
+    except RuntimeError as error:
+        log_line(args.log, f'{target[:7]} FAILED restart ({code}); rollback to {previous[:7]} failed: {error}')
+        return 3
+    if back != 0:
+        log_line(args.log, f'{target[:7]} FAILED restart ({code}); rolled back to {previous[:7]} but it exits {back}')
+        return 3
+    log_line(args.log, f'{target[:7]} FAILED restart ({code}); rolled back to {previous[:7]}')
+    return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())
