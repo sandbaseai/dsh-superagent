@@ -239,6 +239,16 @@ From an allowed GitHub account, open an Issue or post a comment containing `@<ag
 
 ## Upgrade
 
+`scripts/dsh-superagent-deploy` does the steps below for a git checkout, and rolls back when the new build fails or the restarted service is not healthy:
+
+```sh
+scripts/dsh-superagent-deploy --state-dir <stateDir> --profile superagent --url http://127.0.0.1:3082 [--dry-run] [<commit>]
+```
+
+It refuses a checkout with uncommitted changes and a commit that is not on `--branch` (default `origin/main`), and deploys that branch's tip when no commit is given. It builds the target while the service keeps running the previous build, so a failed build never stops the service. It then backs up the database (the newest ten backups are kept in `<stateDir>/../backups`), restarts, and requires `status` exit 0. On failure it checks out and rebuilds the previous commit, restores the database and starts the service again. Each run appends one line to `~/deploy.log`. It exits 0 when deployed or already current, 1 when it failed and rolled back, 2 when it refused before changing anything, and 3 when the rollback failed too.
+
+By hand:
+
 1. Wait until no Executor is in the middle of a turn.
 2. Back up `<stateDir>/orchestrator.sqlite`.
 3. Run `git pull && pnpm install && pnpm build`.
