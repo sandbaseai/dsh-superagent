@@ -1,0 +1,892 @@
+#!/usr/bin/env python3
+"""Read-only on-call tools for dsh-superagent workers: Tencent Cloud CLS log search, Tencent Cloud Monitor reads, Prometheus
+queries, kubectl reads and Grafana API reads.
+Credentials come from `<config dir>/<env>.env` (`$DSH_ONCALL_CONFIG_DIR`, which DSH 0.2.1-rc.3 does not pass to worker shells,
+else `~/.config/dsh-oncall`), a file only its owner
+may read, because DSH strips variables named with KEY, SECRET, TOKEN or PASSWORD from worker shells. Every command only
+reads: CLS calls only SearchLog, Cloud Monitor calls only GetMonitorData, DescribeAlarmHistories, DescribeBaseMetrics and
+DescribeAlarmPolicies, Prometheus gets only GET requests on the query, series, label, rules and alerts APIs, kubectl runs only
+read verbs, and Grafana gets only GET requests on allow-listed paths.
+This is defense in depth; the boundary is read-only credentials. Output is JSON on stdout. Exit 0 on success, 1 when the
+upstream or the tool failed, and 2 when a request is refused by policy or malformed (the message starts with `refused:`).
+"""
+import base64
+import datetime
+import hashlib
+import hmac
+import json
+import math
+import os
+from pathlib import Path
+import re
+import stat
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+ENV_NAME = re.compile(r'^[a-z0-9][a-z0-9-]{0,30}$')
+KNOWN_KEYS = {'CLS_SECRET_ID', 'CLS_SECRET_KEY', 'CLS_REGION', 'CLS_TOPIC_ID', 'CLS_TOPICS', 'CLS_ENDPOINT', 'KUBECONFIG',
+              'KUBE_CONTEXT', 'KUBE_NAMESPACE', 'KUBECTL', 'GRAFANA_BASE_URL', 'GRAFANA_TOKEN', 'MONITOR_SECRET_ID',
+              'MONITOR_SECRET_KEY', 'MONITOR_REGION', 'MONITOR_ENDPOINT', 'PROM_URL', 'PROM_USER', 'PROM_TOKEN', 'GRAFANA_PROM_UID'}
+SECRET_KEYS = ('CLS_SECRET_ID', 'CLS_SECRET_KEY', 'GRAFANA_TOKEN', 'MONITOR_SECRET_ID', 'MONITOR_SECRET_KEY', 'PROM_TOKEN')
+GROUPS = {'cls': ('CLS_SECRET_ID', 'CLS_SECRET_KEY', 'CLS_REGION'), 'kube': ('KUBECONFIG', 'KUBE_CONTEXT', 'KUBE_NAMESPACE'),
+          'grafana': ('GRAFANA_BASE_URL', 'GRAFANA_TOKEN'), 'monitor': ('MONITOR_SECRET_ID', 'MONITOR_SECRET_KEY', 'MONITOR_REGION')}
+# `prom` is reported when either of these key sets is complete (see prom_base).
+PROM_GROUPS = (('PROM_URL', 'PROM_TOKEN'), ('GRAFANA_BASE_URL', 'GRAFANA_TOKEN', 'GRAFANA_PROM_UID'))
+MAX_OUTPUT = 200 * 1024
+MAX_LINE = 4000
+SECRETS = []
+
+
+class Refused(Exception):
+    """A request the policy refuses, or a malformed one (exit 2)."""
+
+
+class Failed(Exception):
+    """An upstream or tool failure (exit 1)."""
+
+
+def redact(text):
+    """Replace every loaded secret value in `text` with `***`."""
+    for value in sorted(SECRETS, key=len, reverse=True):
+        text = text.replace(value, '***')
+    return text
+
+
+def config_dir():
+    """Return the directory that holds the per-environment files."""
+    configured = os.environ.get('DSH_ONCALL_CONFIG_DIR')
+    return Path(configured) if configured else Path.home() / '.config' / 'dsh-oncall'
+
+
+def parse_config(text):
+    """Parse `KEY=VALUE` lines, ignoring blanks and `#` comments and stripping one pair of surrounding quotes."""
+    values = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        key, value = line.split('=', 1)
+        key, value = key.strip(), value.strip()
+        if key.startswith('export '):
+            key = key[len('export '):].strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in '"\'':
+            value = value[1:-1]
+        if key in KNOWN_KEYS:
+            values[key] = value
+    return values
+
+
+def read_config(env):
+    """Return the values of `env`'s file, refusing a missing, non-regular, foreign or group/other-accessible file."""
+    if not ENV_NAME.match(env or ''):
+        raise Refused('refused: environment names match ^[a-z0-9][a-z0-9-]{0,30}$')
+    path = config_dir() / (env + '.env')
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        raise Refused('refused: no configuration file ' + str(path))
+    except OSError as error:
+        raise Refused('refused: cannot read ' + str(path) + ' (' + type(error).__name__ + ')')
+    if not stat.S_ISREG(info.st_mode):
+        raise Refused('refused: ' + str(path) + ' is not a regular file')
+    if info.st_mode & 0o077:
+        raise Refused('refused: ' + str(path) + ' must not be accessible by group or others (chmod 600)')
+    if hasattr(os, 'getuid') and info.st_uid != os.getuid():
+        raise Refused('refused: ' + str(path) + ' is not owned by the current user')
+    try:
+        text = path.read_text(encoding='utf-8')
+    except (OSError, UnicodeDecodeError) as error:
+        raise Refused('refused: cannot read ' + str(path) + ' (' + type(error).__name__ + ')')
+    return parse_config(text)
+
+
+def load(env):
+    """Load `env`'s configuration and register its secrets for redaction."""
+    values = read_config(env)
+    SECRETS.extend(values[key] for key in SECRET_KEYS if values.get(key))
+    return values
+
+
+def require(values, env, *keys):
+    """Refuse when one of `keys` is not set for `env`."""
+    missing = [key for key in keys if not values.get(key)]
+    if missing:
+        raise Refused('refused: ' + env + '.env does not set ' + ', '.join(missing))
+
+
+def cut(text, limit):
+    """Return `text` cut to `limit` characters and whether it was cut."""
+    return (text, False) if len(text) <= limit else (text[:limit], True)
+
+
+def size(payload):
+    """Return the encoded size of `payload` as printed."""
+    return len(redact(json.dumps(payload, ensure_ascii=False, indent=1)).encode('utf-8'))
+
+
+def emit(payload):
+    """Print `payload` as redacted JSON."""
+    print(redact(json.dumps(payload, ensure_ascii=False, indent=1)))
+
+
+def fit_text(payload, field):
+    """Cut the string `payload[field]` until the printed payload fits MAX_OUTPUT."""
+    text = payload.get(field)
+    if not isinstance(text, str) or size(payload) <= MAX_OUTPUT:
+        return payload
+    payload['truncated'] = True
+    over = size(payload) - MAX_OUTPUT
+    while over > 0 and text:
+        text = text[:max(0, len(text) - over - 64)]
+        payload[field] = text
+        over = size(payload) - MAX_OUTPUT
+    return payload
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects so credentials never follow a response to another URL."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise Failed('upstream answered with a redirect (HTTP ' + str(code) + '), which is not followed')
+
+
+OPENER = urllib.request.build_opener(NoRedirect)
+
+
+def request(url, data=None, headers=None, method='GET', timeout=30):
+    """Send one HTTP request and return `(status, text)`; HTTP error statuses are returned, not raised."""
+    req = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
+    try:
+        with OPENER.open(req, timeout=timeout) as response:
+            return response.status, response.read().decode('utf-8', 'replace')
+    except urllib.error.HTTPError as error:
+        return error.code, error.read().decode('utf-8', 'replace')
+    except (urllib.error.URLError, OSError, ValueError) as error:
+        raise Failed('request failed: ' + type(error).__name__ + ': ' + str(getattr(error, 'reason', error)))
+
+
+def parse_json(text):
+    """Return `text` parsed as JSON, or `text` itself when it is not JSON."""
+    try:
+        return json.loads(text)
+    except (ValueError, TypeError):
+        return text
+
+
+# ---- envs ----
+
+def command_envs(_args):
+    """List the configured environments and their tool groups, never their values."""
+    directory = config_dir()
+    envs = []
+    if directory.is_dir():
+        for path in sorted(directory.glob('*.env')):
+            name = path.name[:-len('.env')]
+            if not ENV_NAME.match(name):
+                continue
+            try:
+                values = read_config(name)
+            except Refused as error:
+                envs.append({'name': name, 'tools': [], 'problem': str(error)})
+                continue
+            tools = [group for group, keys in GROUPS.items() if all(values.get(k) for k in keys)]
+            if any(all(values.get(k) for k in keys) for keys in PROM_GROUPS):
+                tools.append('prom')
+            envs.append({'name': name, 'tools': tools})
+    emit({'configDir': str(directory), 'envs': envs})
+    return 0
+
+
+# ---- cls ----
+
+RELATIVE = re.compile(r'^-(\d+)([smhd])$')
+UNITS = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400}
+
+
+def parse_time(value, now_ms):
+    """Return epoch milliseconds for `now`, `-15m`/`-2h`/`-1d`, epoch milliseconds, or ISO-8601 (UTC when no offset)."""
+    if value == 'now':
+        return now_ms
+    match = RELATIVE.match(value)
+    if match:
+        return now_ms - int(match.group(1)) * UNITS[match.group(2)] * 1000
+    if value.isdigit():
+        return int(value)
+    try:
+        moment = datetime.datetime.fromisoformat(value[:-1] + '+00:00' if value.endswith('Z') else value)
+    except ValueError:
+        raise Refused('refused: time ' + value + ' is not now, -Nm/-Nh/-Nd, epoch milliseconds or ISO-8601')
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=datetime.timezone.utc)
+    return int(moment.timestamp() * 1000)
+
+
+def endpoint(values, key, default_url):
+    """Return `(url, host)` of the Tencent Cloud API endpoint in `values[key]` (else `default_url`); plain HTTP is allowed
+    only for a loopback host."""
+    url = values.get(key) or default_url
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme not in ('https', 'http') or not parts.hostname or parts.path not in ('', '/') or parts.query \
+            or parts.fragment or parts.username or parts.password:
+        raise Refused('refused: ' + key + ' must be a bare https:// origin')
+    if parts.scheme == 'http' and parts.hostname not in ('127.0.0.1', 'localhost'):
+        raise Refused('refused: ' + key + ' may use http:// only for 127.0.0.1 or localhost')
+    return parts.scheme + '://' + parts.netloc + '/', parts.netloc
+
+
+def tc3_authorization(secret_id, secret_key, host, content_type, body, timestamp, service):
+    """Return the TC3-HMAC-SHA256 Authorization header for a POST to `/` of the Tencent Cloud API `service`."""
+    date = datetime.datetime.fromtimestamp(timestamp, datetime.timezone.utc).strftime('%Y-%m-%d')
+    scope = date + '/' + service + '/tc3_request'
+    canonical = 'POST\n/\n\ncontent-type:' + content_type + '\nhost:' + host + '\n\ncontent-type;host\n' \
+        + hashlib.sha256(body).hexdigest()
+    to_sign = 'TC3-HMAC-SHA256\n' + str(timestamp) + '\n' + scope + '\n' + hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+
+    def sign(key, message):
+        return hmac.new(key, message.encode('utf-8'), hashlib.sha256).digest()
+
+    signing = sign(sign(sign(('TC3' + secret_key).encode('utf-8'), date), service), 'tc3_request')
+    signature = hmac.new(signing, to_sign.encode('utf-8'), hashlib.sha256).hexdigest()
+    return 'TC3-HMAC-SHA256 Credential=' + secret_id + '/' + scope + ', SignedHeaders=content-type;host, Signature=' + signature
+
+
+def topic_id(values, env, topic):
+    """Resolve `--topic` (a name from CLS_TOPICS or a topic ID), else CLS_TOPIC_ID."""
+    if not topic:
+        require(values, env, 'CLS_TOPIC_ID')
+        return values['CLS_TOPIC_ID']
+    for pair in (values.get('CLS_TOPICS') or '').split(','):
+        name, _, value = pair.partition('=')
+        if name.strip() == topic and value.strip():
+            return value.strip()
+    if not re.match(r'^[A-Za-z0-9-]{1,64}$', topic):
+        raise Refused('refused: topic ' + topic + ' is neither a name in CLS_TOPICS nor a topic ID')
+    return topic
+
+
+def log_entry(result):
+    """Return `{time, source, content}` of one CLS result, with content parsed when it is JSON and long lines cut."""
+    raw = result.get('LogJson') or result.get('RawLog') or ''
+    entry = {'time': result.get('Time'), 'source': result.get('Source')}
+    if len(raw) > MAX_LINE:
+        entry['content'], entry['truncated'] = raw[:MAX_LINE], True
+    else:
+        entry['content'] = parse_json(raw) if raw else raw
+    return entry
+
+
+def command_cls(args):
+    """Search one CLS topic with SearchLog and print the results."""
+    values = load(args.env)
+    require(values, args.env, 'CLS_SECRET_ID', 'CLS_SECRET_KEY', 'CLS_REGION')
+    if not 1 <= args.limit <= 1000:
+        raise Refused('refused: --limit must be between 1 and 1000')
+    topic = topic_id(values, args.env, args.topic)
+    now_ms = int(time.time() * 1000)
+    start, end = parse_time(args.from_, now_ms), parse_time(args.to, now_ms)
+    if start >= end:
+        raise Refused('refused: --from must be before --to')
+    url, host = endpoint(values, 'CLS_ENDPOINT', 'https://cls.tencentcloudapi.com')
+    body = json.dumps({'TopicId': topic, 'From': start, 'To': end, 'Query': args.query, 'Limit': args.limit,
+                       'Sort': args.sort, 'SyntaxRule': 1}, ensure_ascii=False).encode('utf-8')
+    content_type = 'application/json; charset=utf-8'
+    timestamp = int(time.time())
+    headers = {'Content-Type': content_type, 'Host': host, 'X-TC-Action': 'SearchLog', 'X-TC-Version': '2020-10-16',
+               'X-TC-Timestamp': str(timestamp), 'X-TC-Region': values['CLS_REGION'],
+               'Authorization': tc3_authorization(values['CLS_SECRET_ID'], values['CLS_SECRET_KEY'], host, content_type, body,
+                                                  timestamp, 'cls')}
+    status, text = request(url, data=body, headers=headers, method='POST')
+    answer = parse_json(text)
+    response = answer.get('Response') if isinstance(answer, dict) else None
+    if not isinstance(response, dict):
+        raise Failed('CLS answered HTTP ' + str(status) + ' without a Response: ' + cut(text, 500)[0])
+    if response.get('Error'):
+        error = response['Error']
+        emit({'error': {'code': error.get('Code'), 'message': error.get('Message')}, 'requestId': response.get('RequestId')})
+        return 1
+    results = [log_entry(result) for result in response.get('Results') or []]
+    payload = {'topic': topic, 'from': start, 'to': end, 'count': len(results), 'listOver': response.get('ListOver'),
+               'results': results}
+    if response.get('Analysis'):
+        payload['analysis'] = [parse_json(record) for record in response.get('AnalysisRecords') or []]
+    while size(payload) > MAX_OUTPUT and (payload['results'] or payload.get('analysis')):
+        payload['truncated'] = True
+        (payload['results'] or payload['analysis']).pop()
+    payload['count'] = len(payload['results'])
+    emit(payload)
+    return 0
+
+
+def largest_list(value):
+    """Return the list inside `value` with the largest encoded size, preferring lists with more than one item, or None."""
+    best, best_size, best_multi = None, -1, False
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+            if item:
+                multi, item_size = len(item) > 1, len(json.dumps(item, ensure_ascii=False, indent=1))
+                if (multi, item_size) > (best_multi, best_size):
+                    best, best_size, best_multi = item, item_size, multi
+    return best
+
+
+def shrink(payload, field):
+    """Drop items from the largest list in `payload[field]` until the printed payload fits MAX_OUTPUT."""
+    while size(payload) > MAX_OUTPUT:
+        target = largest_list(payload[field])
+        if target is None:
+            break
+        payload['truncated'] = True
+        over, total = size(payload) - MAX_OUTPUT, len(json.dumps(target, ensure_ascii=False, indent=1)) or 1
+        drop = max(1, math.ceil(len(target) * over / total))
+        del target[len(target) - (min(drop, len(target) - 1) if len(target) > 1 else 1):]
+    return payload
+
+
+# ---- monitor ----
+
+MONITOR_ACTIONS = ('GetMonitorData', 'DescribeAlarmHistories', 'DescribeBaseMetrics', 'DescribeAlarmPolicies')
+REGION = re.compile(r'^[a-z]+-[a-z]+(-[0-9]+)?$')
+MAX_PARAMS = 8 * 1024
+
+
+def iso_seconds(params, field):
+    """Return the ISO-8601 string `params[field]` as epoch seconds (UTC when no offset)."""
+    value = params.get(field)
+    if not isinstance(value, str) or value.isdigit() or value == 'now' or RELATIVE.match(value):
+        raise Refused('refused: GetMonitorData needs ' + field + ' as an ISO-8601 string')
+    return parse_time(value, 0) / 1000
+
+
+def check_monitor(action, params):
+    """Refuse an action outside the read allow list and over-wide time ranges or pages."""
+    if action not in MONITOR_ACTIONS:
+        raise Refused('refused: Cloud Monitor action ' + str(action) + ' is not one of ' + ', '.join(MONITOR_ACTIONS))
+    if action == 'GetMonitorData':
+        start, end = iso_seconds(params, 'StartTime'), iso_seconds(params, 'EndTime')
+        if not 0 < end - start <= 86400:
+            raise Refused('refused: GetMonitorData needs StartTime before EndTime and a span of at most 24 h')
+        period = params.get('Period')
+        if not isinstance(period, int) or isinstance(period, bool) or period < 60:
+            raise Refused('refused: GetMonitorData needs Period of at least 60 seconds')
+    if action == 'DescribeAlarmHistories':
+        page = params.get('PageSize', 20)
+        if not isinstance(page, int) or isinstance(page, bool) or not 1 <= page <= 100:
+            raise Refused('refused: DescribeAlarmHistories allows PageSize 1-100')
+        start, end = params.get('StartTime'), params.get('EndTime')
+        if not all(isinstance(v, int) and not isinstance(v, bool) for v in (start, end)) or not 0 < end - start <= 7 * 86400:
+            raise Refused('refused: DescribeAlarmHistories needs StartTime and EndTime in epoch seconds, at most 7 days apart')
+
+
+def command_monitor(args):
+    """Call one read-only Tencent Cloud Monitor API action and print its Response."""
+    if len(args.params.encode('utf-8')) > MAX_PARAMS:
+        raise Refused('refused: --params must be at most 8 KiB')
+    try:
+        params = json.loads(args.params)
+    except ValueError:
+        raise Refused('refused: --params must be a JSON object')
+    if not isinstance(params, dict):
+        raise Refused('refused: --params must be a JSON object')
+    check_monitor(args.action, params)
+    values = load(args.env)
+    require(values, args.env, 'MONITOR_SECRET_ID', 'MONITOR_SECRET_KEY', 'MONITOR_REGION')
+    region = args.region or values['MONITOR_REGION']
+    if not REGION.match(region):
+        raise Refused('refused: region ' + region + ' does not match ^[a-z]+-[a-z]+(-[0-9]+)?$')
+    url, host = endpoint(values, 'MONITOR_ENDPOINT', 'https://monitor.tencentcloudapi.com')
+    body = json.dumps(params, ensure_ascii=False).encode('utf-8')
+    content_type = 'application/json; charset=utf-8'
+    timestamp = int(time.time())
+    headers = {'Content-Type': content_type, 'Host': host, 'X-TC-Action': args.action, 'X-TC-Version': '2018-07-24',
+               'X-TC-Timestamp': str(timestamp), 'X-TC-Region': region,
+               'Authorization': tc3_authorization(values['MONITOR_SECRET_ID'], values['MONITOR_SECRET_KEY'], host, content_type,
+                                                  body, timestamp, 'monitor')}
+    status, text = request(url, data=body, headers=headers, method='POST')
+    answer = parse_json(text)
+    response = answer.get('Response') if isinstance(answer, dict) else None
+    if not isinstance(response, dict):
+        raise Failed('Cloud Monitor answered HTTP ' + str(status) + ' without a Response: ' + cut(text, 500)[0])
+    request_id = response.pop('RequestId', None)
+    if response.get('Error'):
+        error = response['Error']
+        emit({'error': {'code': error.get('Code'), 'message': error.get('Message')}, 'requestId': request_id})
+        return 1
+    emit(shrink({'action': args.action, 'region': region, 'requestId': request_id, 'response': response}, 'response'))
+    return 0
+
+
+# ---- prom ----
+
+PROM_COMMANDS = {'query': 'query', 'range': 'query_range', 'series': 'series', 'labels': 'labels', 'label-values': None,
+                 'rules': 'rules', 'alerts': 'alerts'}
+LABEL = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
+MAX_QUERY = 4000
+
+
+def check_base(url, key, allow_path):
+    """Refuse a base URL that is not https (http only on loopback) or that carries a query, fragment or credentials."""
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme not in ('https', 'http') or not parts.hostname or parts.query or parts.fragment or parts.username \
+            or parts.password or (not allow_path and parts.path not in ('', '/')):
+        raise Refused('refused: ' + key + ' must be an http(s) URL without query, fragment or credentials')
+    if parts.scheme == 'http' and parts.hostname not in ('127.0.0.1', 'localhost'):
+        raise Refused('refused: ' + key + ' may use http:// only for 127.0.0.1 or localhost')
+    return url.rstrip('/')
+
+
+def prom_base(values, env):
+    """Return `(base URL, Authorization)` from PROM_URL, else from the Grafana Prometheus datasource proxy."""
+    if values.get('PROM_URL') and values.get('PROM_TOKEN'):
+        base = check_base(values['PROM_URL'], 'PROM_URL', True)
+        if values.get('PROM_USER'):
+            pair = (values['PROM_USER'] + ':' + values['PROM_TOKEN']).encode('utf-8')
+            encoded = base64.b64encode(pair).decode('ascii')
+            SECRETS.append(encoded)
+            return base, 'Basic ' + encoded
+        return base, 'Bearer ' + values['PROM_TOKEN']
+    if values.get('GRAFANA_BASE_URL') and values.get('GRAFANA_TOKEN') and values.get('GRAFANA_PROM_UID'):
+        if not re.match('^' + UID + '$', values['GRAFANA_PROM_UID']):
+            raise Refused('refused: GRAFANA_PROM_UID must match ^[A-Za-z0-9_-]+$')
+        base = check_base(values['GRAFANA_BASE_URL'], 'GRAFANA_BASE_URL', True)
+        return base + '/api/datasources/proxy/uid/' + values['GRAFANA_PROM_UID'], 'Bearer ' + values['GRAFANA_TOKEN']
+    raise Refused('refused: ' + env + '.env sets neither PROM_URL and PROM_TOKEN nor GRAFANA_BASE_URL, GRAFANA_TOKEN and '
+                  'GRAFANA_PROM_UID')
+
+
+def prom_seconds(ms):
+    """Return epoch milliseconds as the Prometheus seconds parameter."""
+    return str(ms // 1000) if ms % 1000 == 0 else '%.3f' % (ms / 1000)
+
+
+def prom_window(options, limit_seconds, now_ms):
+    """Return `(start_ms, end_ms)` of `--from`/`--to`, refusing an empty or over-wide window."""
+    start, end = parse_time(options.from_, now_ms), parse_time(options.to, now_ms)
+    if start >= end:
+        raise Refused('refused: --from must be before --to')
+    if end - start > limit_seconds * 1000:
+        raise Refused('refused: the window --from..--to is at most ' + str(limit_seconds // 3600) + ' h for this command')
+    return start, end
+
+
+def check_query(text, flag):
+    """Refuse an empty or over-long PromQL expression."""
+    if not text:
+        raise Refused('refused: ' + flag + ' needs a value')
+    if len(text) > MAX_QUERY:
+        raise Refused('refused: ' + flag + ' is at most ' + str(MAX_QUERY) + ' characters')
+
+
+def command_prom(sub, options):
+    """GET one Prometheus HTTP API read endpoint and print its data."""
+    now_ms = int(time.time() * 1000)
+    params, step = [], None
+    path = PROM_COMMANDS[sub]
+    if sub == 'query':
+        check_query(options.query, '--query')
+        params = [('query', options.query), ('time', prom_seconds(parse_time(options.time, now_ms)))]
+    elif sub == 'range':
+        check_query(options.query, '--query')
+        start, end = prom_window(options, 86400, now_ms)
+        if options.step < 1:
+            raise Refused('refused: --step must be a positive number of seconds')
+        step = max(options.step, 15, math.ceil((end - start) / 1000 / 1100))
+        params = [('query', options.query), ('start', prom_seconds(start)), ('end', prom_seconds(end)), ('step', str(step))]
+    elif sub in ('series', 'labels', 'label-values'):
+        if sub == 'series' and not options.match:
+            raise Refused('refused: series needs at least one --match')
+        if sub == 'label-values':
+            if not LABEL.match(options.label or ''):
+                raise Refused('refused: --label must match ^[a-zA-Z_][a-zA-Z0-9_]*$')
+            path = 'label/' + options.label + '/values'
+        for match in options.match:
+            check_query(match, '--match')
+        start, end = prom_window(options, 6 * 3600, now_ms)
+        params = [('match[]', match) for match in options.match] + [('start', prom_seconds(start)), ('end', prom_seconds(end))]
+    values = load(options.env)
+    base, authorization = prom_base(values, options.env)
+    url = base + '/api/v1/' + path + ('?' + urllib.parse.urlencode(params) if params else '')
+    status, text = request(url, headers={'Authorization': authorization, 'Accept': 'application/json'})
+    answer = parse_json(text)
+    if not isinstance(answer, dict) or 'status' not in answer:
+        raise Failed('Prometheus answered HTTP ' + str(status) + ' without a status: ' + cut(text, 500)[0])
+    if answer.get('status') != 'success':
+        emit({'status': answer.get('status'), 'httpStatus': status, 'errorType': answer.get('errorType'),
+              'error': answer.get('error')})
+        return 1
+    data = answer.get('data')
+    payload = {'status': 'success'}
+    if step is not None:
+        payload['step'] = step
+    if isinstance(data, dict) and 'resultType' in data:
+        payload['resultType'], payload['result'] = data.get('resultType'), data.get('result')
+    else:
+        payload['result'] = data
+    if answer.get('warnings'):
+        payload['warnings'] = answer['warnings']
+    emit(shrink(payload, 'result'))
+    return 0
+
+
+# ---- kube ----
+
+READ_VERBS = {'get', 'describe', 'logs', 'top', 'events', 'explain', 'api-resources', 'version'}
+SUB_VERBS = {'rollout': {'history', 'status'}, 'auth': {'can-i', 'whoami'}}
+REFUSED_LONG = {'--kubeconfig', '--context', '--cluster', '--user', '--as', '--as-group', '--as-uid', '--as-user-extra', '--token', '--server',
+                '--insecure-skip-tls-verify', '--raw', '--overrides', '--filename', '--kustomize', '--watch', '--watch-only',
+                '--follow', '--template', '--profile', '--profile-output', '--cache-dir', '--log-file', '--log-dir',
+                '--client-key', '--client-certificate', '--certificate-authority', '--username', '--password'}
+# Output formats that make kubectl read a local file named in the flag and print it as the template.
+FILE_OUTPUTS = ('go-template-file', 'jsonpath-file', 'templatefile', 'custom-columns-file')
+REFUSED_SHORT = set('sfkw')
+# Shorthand flags whose value may follow in the same word (`-nfoo`), so the rest of the word is not more flags.
+VALUE_SHORT = set('nlocL')
+NAMESPACE_FLAGS = {'-n', '--namespace', '-A', '--all-namespaces'}
+
+
+def resource_parts(word):
+    """Return the lower-cased resource names in a word such as `pods,secrets` or `secret/x`."""
+    return [part.split('/', 1)[0].strip() for part in word.lower().split(',')]
+
+
+def is_kind(word, names):
+    """Return whether one resource in `word` is one of `names`, plain or qualified (`secrets.v1.`)."""
+    return any(part in names or part.split('.', 1)[0] in names for part in resource_parts(word))
+
+
+def flag_name(word):
+    """Return the flag of a word (`--tail=5` -> `--tail`), or None for a non-flag word; kubectl reads `_` in a long flag
+    name as `-` (`--cache_dir` is `--cache-dir`), so the name is normalized the same way."""
+    if word.startswith('--'):
+        return word.split('=', 1)[0].replace('_', '-')
+    if word.startswith('-') and len(word) > 1:
+        return word[:2]
+    return None
+
+
+def check_output(output):
+    """Refuse an output format that reads a local file, which kubectl would print verbatim and unredacted."""
+    if output.split('=', 1)[0].strip().lower() in FILE_OUTPUTS:
+        raise Refused('refused: -o ' + output.split('=', 1)[0] + ' reads a local file; use an inline template instead')
+    return output
+
+
+def check_kube(args):
+    """Refuse write verbs, credential overrides, local file reads and writes, watches, follows, Secrets and ConfigMap contents."""
+    if not args:
+        raise Refused('refused: kube needs a kubectl verb')
+    verb = args[0]
+    if verb in SUB_VERBS:
+        if len(args) < 2 or args[1] not in SUB_VERBS[verb]:
+            raise Refused('refused: kubectl ' + verb + ' allows only ' + ', '.join(sorted(SUB_VERBS[verb])))
+    elif verb not in READ_VERBS:
+        raise Refused('refused: kubectl ' + verb + ' is not a read verb')
+    output, words = None, []
+    for index, word in enumerate(args):
+        if word.startswith('--'):
+            if flag_name(word) in REFUSED_LONG:
+                raise Refused('refused: ' + flag_name(word) + ' is not allowed')
+            if word.startswith('--output='):
+                output = check_output(word.split('=', 1)[1])
+            elif word == '--output' and index + 1 < len(args):
+                output = check_output(args[index + 1])
+        elif word.startswith('-') and len(word) > 1:
+            for position, letter in enumerate(word[1:], 1):
+                if letter in REFUSED_SHORT:
+                    raise Refused('refused: -' + letter + ' is not allowed')
+                if letter == 'o':
+                    rest = word[position + 1:]
+                    output = check_output(rest[1:] if rest.startswith('=') else rest or (args[index + 1] if index + 1 < len(args) else ''))
+                if letter in VALUE_SHORT:
+                    break
+        else:
+            words.append(word)
+    if any(is_kind(word, {'secret', 'secrets'}) for word in words):
+        raise Refused('refused: Secrets are not readable through dsh-oncall')
+    configmap = any(is_kind(word, {'configmap', 'configmaps', 'cm'}) for word in words)
+    if configmap and verb == 'describe':
+        raise Refused('refused: describe shows ConfigMap contents')
+    if configmap and verb == 'get' and output is not None and output not in ('wide', 'name'):
+        raise Refused('refused: get configmap allows only -o wide or -o name')
+
+
+def tail_value(args):
+    """Return the index and value of the --tail flag in `args`, or None."""
+    for index, word in enumerate(args):
+        if word.startswith('--tail='):
+            return index, word.split('=', 1)[1]
+        if word == '--tail' and index + 1 < len(args):
+            return index, args[index + 1]
+    return None
+
+
+def log_defaults(args):
+    """Add --tail=200 and --since=1h to logs when absent, and cap --tail at 2000."""
+    args = list(args)
+    found = tail_value(args)
+    if found is None:
+        args.append('--tail=200')
+    else:
+        index, value = found
+        try:
+            number = int(value)
+        except ValueError:
+            raise Refused('refused: --tail must be a number')
+        if args[index] == '--tail':
+            del args[index + 1]
+        args[index] = '--tail=' + str(2000 if number < 0 or number > 2000 else number)
+    if not any(flag_name(word) in ('--since', '--since-time') for word in args):
+        args.append('--since=1h')
+    return args
+
+
+def find_kubectl(values):
+    """Return KUBECTL when set (absolute), else the first kubectl on PATH outside a `worker-bin` directory."""
+    configured = values.get('KUBECTL')
+    if configured:
+        if not os.path.isabs(configured):
+            raise Refused('refused: KUBECTL must be an absolute path')
+        if not os.access(configured, os.X_OK):
+            raise Failed('KUBECTL ' + configured + ' is not executable')
+        return configured
+    for entry in os.environ.get('PATH', '').split(os.pathsep):
+        if not entry or os.path.basename(os.path.normpath(entry)) == 'worker-bin':
+            continue
+        candidate = os.path.join(entry, 'kubectl')
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    raise Failed('kubectl was not found on PATH; set KUBECTL')
+
+
+def command_kube(env, args):
+    """Run one read-only kubectl command against the environment's kubeconfig, context and namespace."""
+    values = load(env)
+    require(values, env, 'KUBECONFIG', 'KUBE_CONTEXT', 'KUBE_NAMESPACE')
+    check_kube(args)
+    if args[0] == 'logs':
+        args = log_defaults(args)
+    command = [find_kubectl(values), '--kubeconfig', values['KUBECONFIG'], '--context', values['KUBE_CONTEXT']]
+    if not any(flag_name(word) in NAMESPACE_FLAGS or (word.startswith('-n') and not word.startswith('--')) for word in args):
+        command += ['-n', values['KUBE_NAMESPACE']]
+    command += ['--request-timeout=30s', *args]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        raise Failed('kubectl did not finish within 60 seconds')
+    except OSError as error:
+        raise Failed('kubectl could not run: ' + type(error).__name__)
+    stdout = result.stdout
+    if args[0] == 'logs':
+        lines, cut_any = [], False
+        for line in stdout.splitlines():
+            line, was_cut = cut(line, MAX_LINE)
+            lines.append(line)
+            cut_any = cut_any or was_cut
+        stdout = '\n'.join(lines) + ('\n' if stdout.endswith('\n') else '')
+    else:
+        cut_any = False
+    payload = {'exitCode': result.returncode, 'stdout': stdout, 'stderr': cut(result.stderr, 8000)[0]}
+    if cut_any:
+        payload['truncated'] = True
+    emit(fit_text(payload, 'stdout'))
+    return 0 if result.returncode == 0 else 1
+
+
+# ---- grafana ----
+
+UID = r'[A-Za-z0-9_-]+'
+REST = r'[A-Za-z0-9_./:-]*'
+GRAFANA_PATHS = [re.compile('^' + pattern + '$') for pattern in (
+    r'/api/health', r'/api/search', r'/api/dashboards/uid/' + UID, r'/api/datasources',
+    r'/api/datasources/uid/' + UID + r'/resources/api/v1/' + REST,
+    r'/api/datasources/proxy/uid/' + UID + r'/api/v1/' + REST,
+    r'/api/datasources/proxy/uid/' + UID + r'/loki/api/v1/' + REST,
+    r'/api/annotations', r'/api/alertmanager/grafana/api/v2/alerts(/' + REST + ')?',
+    r'/api/prometheus/grafana/api/v1/rules')]
+
+
+def check_grafana_path(path):
+    """Refuse a Grafana path that is not on the read-only allow list."""
+    lowered = path.lower()
+    if not path.startswith('/') or any(part in lowered for part in ('?', '#', '..', '//', '%2e', '%', '\\')):
+        raise Refused('refused: Grafana path ' + path + ' contains ?, #, .., //, % or does not start with /')
+    if not any(pattern.match(path) for pattern in GRAFANA_PATHS):
+        raise Refused('refused: Grafana path ' + path + ' is not on the read-only allow list')
+
+
+def command_grafana(args):
+    """GET one allow-listed Grafana API path and print its status and body."""
+    check_grafana_path(args.path)
+    params = []
+    for param in args.param:
+        key, sep, value = param.partition('=')
+        if not sep or not key:
+            raise Refused('refused: --param takes key=value')
+        params.append((key, value))
+    values = load(args.env)
+    require(values, args.env, 'GRAFANA_BASE_URL', 'GRAFANA_TOKEN')
+    base = values['GRAFANA_BASE_URL'].rstrip('/')
+    parts = urllib.parse.urlsplit(base)
+    if parts.scheme not in ('https', 'http') or not parts.hostname or parts.query or parts.fragment or parts.username:
+        raise Refused('refused: GRAFANA_BASE_URL must be an http(s) URL without query or credentials')
+    if parts.scheme == 'http' and parts.hostname not in ('127.0.0.1', 'localhost'):
+        raise Refused('refused: GRAFANA_BASE_URL may use http:// only for 127.0.0.1 or localhost')
+    url = base + args.path + ('?' + urllib.parse.urlencode(params) if params else '')
+    status, text = request(url, headers={'Authorization': 'Bearer ' + values['GRAFANA_TOKEN'], 'Accept': 'application/json'})
+    body = parse_json(text)
+    payload = {'status': status, 'body': body}
+    if size(payload) > MAX_OUTPUT:
+        payload = fit_text({'status': status, 'body': text, 'truncated': True}, 'body')
+    emit(payload)
+    return 0 if 200 <= status < 300 else 1
+
+
+# ---- command line ----
+
+USAGE = """usage:
+  dsh-oncall envs
+  dsh-oncall cls --env E --query Q [--topic ID_OR_NAME] [--from -15m] [--to now] [--limit 50] [--sort desc]
+  dsh-oncall kube --env E <kubectl read args...>
+  dsh-oncall monitor --env E --action GetMonitorData|DescribeAlarmHistories|DescribeBaseMetrics|DescribeAlarmPolicies
+                     --params '<JSON object>' [--region ap-singapore]
+  dsh-oncall prom --env E query --query Q [--time now]
+  dsh-oncall prom --env E range --query Q [--from -1h] [--to now] [--step 60]
+  dsh-oncall prom --env E series --match M [--match M ...] [--from -1h] [--to now]
+  dsh-oncall prom --env E labels [--match M ...] [--from -1h] [--to now]
+  dsh-oncall prom --env E label-values --label NAME [--match M ...] [--from -1h] [--to now]
+  dsh-oncall prom --env E rules|alerts
+  dsh-oncall grafana --env E <path> [--param key=value ...]
+Times: now, -15m/-2h/-1d, epoch milliseconds or ISO-8601. prom range is at most 24 h (step raised to at least
+max(15, range/1100) seconds); series, labels and label-values windows at most 6 h. monitor GetMonitorData takes
+StartTime/EndTime as ISO-8601 at most 24 h apart and Period >= 60; DescribeAlarmHistories takes StartTime/EndTime in
+epoch seconds at most 7 days apart and PageSize <= 100.
+"""
+
+
+class Options:
+    """Parsed options of one subcommand."""
+
+
+def take_env(argv):
+    """Split `--env E` (or `--env=E`) from the front of `argv`."""
+    if argv and argv[0].startswith('--env='):
+        return argv[0].split('=', 1)[1], argv[1:]
+    if len(argv) >= 2 and argv[0] == '--env':
+        return argv[1], argv[2:]
+    raise Refused('refused: --env E must come first\n' + USAGE)
+
+
+def parse_options(argv, spec, positional=None):
+    """Parse `--name value` options described by `spec` ({flag: (attribute, default, kind)}) and an optional positional."""
+    options = Options()
+    for _flag, (attribute, default, _kind) in spec.items():
+        setattr(options, attribute, list(default) if isinstance(default, list) else default)
+    if positional:
+        setattr(options, positional, None)
+    index = 0
+    while index < len(argv):
+        word = argv[index]
+        flag, sep, inline = word.partition('=') if word.startswith('--') else (word, '', '')
+        if flag in spec:
+            attribute, default, kind = spec[flag]
+            if sep:
+                value = inline
+            elif index + 1 < len(argv):
+                index += 1
+                value = argv[index]
+            else:
+                raise Refused('refused: ' + flag + ' needs a value\n' + USAGE)
+            if kind is int:
+                try:
+                    value = int(value)
+                except ValueError:
+                    raise Refused('refused: ' + flag + ' takes a number')
+            elif isinstance(kind, tuple) and value not in kind:
+                raise Refused('refused: ' + flag + ' takes one of ' + ', '.join(kind))
+            if isinstance(default, list):
+                getattr(options, attribute).append(value)
+            else:
+                setattr(options, attribute, value)
+        elif positional and getattr(options, positional) is None and not word.startswith('-'):
+            setattr(options, positional, word)
+        else:
+            raise Refused('refused: unexpected argument ' + word + '\n' + USAGE)
+        index += 1
+    return options
+
+
+def run(argv):
+    """Dispatch one command and return its exit status."""
+    if not argv or argv[0] in ('-h', '--help', 'help'):
+        sys.stdout.write(USAGE)
+        return 0 if argv else 2
+    command, rest = argv[0], argv[1:]
+    if command == 'envs':
+        if rest:
+            raise Refused('refused: envs takes no arguments')
+        return command_envs(None)
+    if command not in ('cls', 'monitor', 'prom', 'kube', 'grafana'):
+        raise Refused('refused: unknown command ' + command + '\n' + USAGE)
+    env, rest = take_env(rest)
+    if command == 'kube':
+        return command_kube(env, rest[1:] if rest[:1] == ['--'] else rest)
+    if command == 'monitor':
+        options = parse_options(rest, {'--action': ('action', None, str), '--params': ('params', '{}', str),
+                                       '--region': ('region', None, str)})
+        if not options.action:
+            raise Refused('refused: monitor needs --action\n' + USAGE)
+        options.env = env
+        return command_monitor(options)
+    if command == 'prom':
+        sub, rest = (rest[0], rest[1:]) if rest else (None, [])
+        if sub not in PROM_COMMANDS:
+            raise Refused('refused: prom needs one of ' + ', '.join(PROM_COMMANDS) + '\n' + USAGE)
+        window = {'--from': ('from_', '-1h', str), '--to': ('to', 'now', str)}
+        matches = {'--match': ('match', [], str)}
+        spec = {'query': {'--query': ('query', None, str), '--time': ('time', 'now', str)},
+                'range': {'--query': ('query', None, str), **window, '--step': ('step', 60, int)},
+                'series': {**matches, **window}, 'labels': {**matches, **window},
+                'label-values': {'--label': ('label', None, str), **matches, **window}}.get(sub, {})
+        options = parse_options(rest, spec)
+        options.env = env
+        return command_prom(sub, options)
+    if command == 'cls':
+        options = parse_options(rest, {'--query': ('query', None, str), '--topic': ('topic', None, str),
+                                       '--from': ('from_', '-15m', str), '--to': ('to', 'now', str),
+                                       '--limit': ('limit', 50, int), '--sort': ('sort', 'desc', ('asc', 'desc'))})
+        if not options.query:
+            raise Refused('refused: cls needs --query\n' + USAGE)
+        options.env = env
+        return command_cls(options)
+    options = parse_options(rest, {'--param': ('param', [], str)}, positional='path')
+    if not options.path:
+        raise Refused('refused: grafana needs a path\n' + USAGE)
+    options.env = env
+    return command_grafana(options)
+
+
+def main():
+    """Run the command line, mapping refusals to exit 2 and failures to exit 1 with redacted messages."""
+    try:
+        return run(sys.argv[1:])
+    except Refused as error:
+        sys.stderr.write(redact(str(error)).rstrip('\n') + '\n')
+        return 2
+    except Failed as error:
+        sys.stderr.write('error: ' + redact(str(error)) + '\n')
+        return 1
+    except Exception as error:  # noqa: BLE001 - last line of defense: never print a traceback with local values
+        sys.stderr.write('error: ' + type(error).__name__ + ': ' + redact(str(error)) + '\n')
+        return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

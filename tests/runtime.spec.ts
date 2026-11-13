@@ -23,7 +23,10 @@ import { feishuKind } from '../src/sources/feishu.ts'
 import { githubKind, pollRound } from '../src/sources/github.ts'
 import { CliError, Commands } from '../src/infra/commands.ts'
 import { UserError, key, runningAssignment, said, threadKey, waitsForPerson, type Trigger } from '../src/core/index.ts'
-import { feishuTrigger } from '../src/sources/feishu.ts'
+import { feishuTrigger, historyEvent } from '../src/sources/feishu.ts'
+import { ALERT_BOT, ALERT_CHAT, clsAlert, clsRecovery } from './fixtures/cls-alert.ts'
+import { ALERT_BOT as TENCENT_BOT, ALERT_CHAT as TENCENT_CHAT, fallback404, qpsFiring, qpsOngoing, qpsRecovered }
+  from './fixtures/tencent-alerts.ts'
 import { feishuChannel } from '../src/sources/feishu-trigger.ts'
 import { commentTrigger, githubChannel } from '../src/sources/github-trigger.ts'
 import { IM_WORDS } from '../src/infra/text.ts'
@@ -150,6 +153,7 @@ beforeEach(async () => {
     [`${BOT()} config strict-mode`]: 'strict-mode: bot (source: profile)',
     [`${BOT()} api GET /open-apis/bot/v3/info --as bot --format ndjson`]: '{"bot":{"open_id":"ou_bot"},"code":0,"msg":"ok"}',
     [HELPERS]: `file:${workerGitConfig(directory)}\0${credentialHelper(AGENT())}\0`,
+    ['git config -z --show-origin --get user.useConfigOnly']: `file:${workerGitConfig(directory)}\0true\0`,
     [SCOPED]: `global\0credential.helper\n\0global\0credential.https://github.com.helper\n${credentialHelper(AGENT())}\0`,
   }
   const ctx = new Context()
@@ -840,6 +844,161 @@ it('waits for setup without the agent\'s GitHub CLI: the panel works, and nothin
   await vi.waitFor(() => expect(restarts).toHaveBeenCalledTimes(2))
 })
 
+it('runs without GitHub when the GitHub Source names neither a repository nor a CLI: setup passes, Feishu works, no GitHub skill or account', async () => {
+  const next = await restart({}, { github: { repository: '', cli: '' } })
+  await next.ready
+  expect(next.configured()).toBe(true)
+  expect(next.setupProblem).toBeUndefined()
+  expect(next.deployment.github).toBeUndefined()
+  expect((await api('GET', 'state')).body).toMatchObject({ setup: { accounts: { repository: '', agent: null, feishu: { appId: 'cli_bot' } } } })
+  expect(next.prompts.skills(next.prompts.current().config).map(([name]) => name)).not.toContain('github')
+  next.sources.register(feishuKind); next.sources.register(githubKind)
+  deliveries.mockClear()
+  const trigger = feishu('32', '@bot 看一下这个告警')
+  await receive(trigger, next)
+  expect(relays(next.masterId)).toContainEqual(expect.objectContaining({ kind: 'candidate', trigger_id: trigger.id }))
+})
+describe('the Feishu on-call kit', () => {
+  /** The kit's policy block, with the fixture's alarm bot on the Feishu bots list. */
+  const kitPolicy = () => {
+    const policy = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'examples', 'feishu-cls-oncall', 'settings', 'policy.json'), 'utf8'))
+    policy.sources.feishu.bots = [{ id: ALERT_BOT, name: '腾讯云告警' }, { id: TENCENT_BOT, name: '腾讯云告警' }]
+    return policy as { rules: { id: string; name: string; instruction: string }[] }
+  }
+  /** A deployment without GitHub whose Feishu Source receives every message of the alert chat, under the kit's policy in auto mode. */
+  async function alertDeployment(): Promise<Runtime> {
+    const next = await restart({}, { github: { repository: '', cli: '' } })
+    await next.ready
+    next.sources.register(feishuKind)
+    const save = (block: 'policy' | 'eval' | 'source:feishu', value: unknown) => next.settings.save(block, value, next.store.blockRevision(block), 'panel')
+    expect(await save('source:feishu', { enabled: true, config: { cli: BOT(), chats: [{ chatId: ALERT_CHAT, listen: 'all' }, { chatId: TENCENT_CHAT, listen: 'all' }], directMessages: false, otherChats: 'none' } }))
+      .toMatchObject({ restarting: false })
+    await save('policy', kitPolicy())
+    await save('eval', { mode: 'auto', timeoutSeconds: 120, model: null })
+    deliveries.mockClear()
+    return next
+  }
+  const alertTrigger = (message: typeof clsAlert) => feishuTrigger(historyEvent(message, message.chat_id, false), 'ou_bot', 'cli_bot')!
+
+  it('investigates a CLS alert from a listed Feishu bot without GitHub: inferred candidate, silent accept under tencent-alert, worker without GitHub, one reply in the alert thread', async () => {
+    const next = await alertDeployment()
+    const trigger = alertTrigger(clsAlert)
+    expect(trigger.human).toBe(false)
+    await receive(trigger, next)
+    expect(relays(next.masterId)).toContainEqual(expect.objectContaining({ kind: 'candidate', trigger_id: trigger.id, strength: 'inferred' }))
+    vi.spyOn(Commands.prototype, 'lark').mockResolvedValue({ items: [{ message_id: 'om_clsalert1', chat_id: ALERT_CHAT }] })
+    await runTool(next.masterId, 'orchestrator_eval', { trigger_id: trigger.id })
+    const accepted = await runTool(next.masterId, 'orchestrator_eval_decide', { trigger_id: trigger.id, decision: 'accept',
+      title: 'app-apiserver 5xx 过多', worktree_name: 'apiserver-5xx', scope: 'Read-only investigation of the alarm', reason: 'A firing CLS alarm from the listed alarm bot',
+      intent_evidence: '告警策略：app-apiserver 5xx 过多; 通知类型：告警; no open ticket for this policy',
+      rule_assessments: [{ rule_id: 'tencent-alert', matched: true, reason: 'A firing CLS alarm in the alert chat' }],
+      direction: { implementation_requested: true, target_basis: 'existing-standard', requires_design_decision: false, evidence: '$1.c > 50 against the normal 5xx rate' } })
+    const ticket = next.store.tickets.get((accepted.ticket as { ticket_id: string }).ticket_id)!
+    expect(ticket.mandate).toMatchObject({ strength: 'inferred', basis: expect.objectContaining({ via: 'bot', sender: '腾讯云告警', rules: ['tencent-alert'], observation: { mode: 'auto' } }) })
+    // Silent: the rule says so, and the decision carries no acknowledgement.
+    expect(next.store.replyStatus(key('ack', trigger.id))).toBeUndefined()
+    await next.idle()
+    const sessionId = `worker-${ticket.id}`
+    const rule = kitPolicy().rules[0]!
+    expect(await runTool(sessionId, 'orchestrator_read', { resource: `ticket/${ticket.id}/assignment` }))
+      .toMatchObject({ text: expect.stringContaining(`${rule.name} (${rule.id}): ${rule.instruction}`) })
+    expect(next.ticketEnvironment(ticket).map(variable => variable.key).filter(name => name.startsWith('DSH_SUPERAGENT_GITHUB_'))).toEqual([])
+    await runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: '结论：发布后新 Pod 连接池耗尽（中）。证据：dsh-oncall cls … 137 条 5xx。' })
+    expect(relays(next.masterId).at(-1)).toMatchObject({ kind: 'worker_report', state: 'ready' })
+    expect(await runTool(next.masterId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'result', text: '**结论**：发布后新 Pod 连接池耗尽（置信度中）。' }))
+      .toEqual({ status: 'sent' })
+    const replies = vi.mocked(Commands.prototype.lark).mock.calls.map(([args]) => args).filter(args => args[1] === '+messages-reply')
+    expect(replies).toEqual([expect.arrayContaining(['--message-id', 'om_clsalert1', '--reply-in-thread'])])
+  })
+
+  it('does not relay the alert from a bot not on the list, and ignores a listed bot\'s recovery notice without an assessment', async () => {
+    const next = await alertDeployment()
+    const unlisted = alertTrigger({ ...clsAlert, message_id: 'om_clsother1', sender: { ...clsAlert.sender, id: 'cli_otherbot' } })
+    await receive(unlisted, next)
+    expect(relays(next.masterId)).toEqual([])
+    // The notice parses as an alert, so its Decision is on its alert Thread.
+    expect(unlisted.threads).toHaveLength(2)
+    expect(next.store.decisions.byThread(threadKey(unlisted.threads[0]!)))
+      .toEqual([expect.objectContaining({ kind: 'ignore', reason: [expect.objectContaining({ code: 'not_human' })] })])
+    const recovery = alertTrigger(clsRecovery)
+    await receive(recovery, next)
+    expect(relays(next.masterId)).toEqual([])
+    expect(next.store.decisions.byThread(threadKey(recovery.threads[0]!)).at(-1))
+      .toMatchObject({ kind: 'ignore', reason: [expect.objectContaining({ code: 'alert_recovered' })] })
+  })
+  const QPS_TITLE = 'example_alerts_p2/ProviderQPSSpike · 供应商 provider-a 流量突增'
+  const qpsDecision = (triggerId: string, decision: 'accept' | 'ignore' = 'accept') => ({ trigger_id: triggerId, decision, title: QPS_TITLE,
+    worktree_name: 'provider-qps-spike', scope: 'Read-only investigation of the alarm', reason: decision === 'accept'
+      ? 'A firing Prometheus alarm from the listed alarm bot' : 'Repeat of an alarm accepted within 6 hours',
+    ...decision === 'accept' ? { intent_evidence: '告警策略: example_alerts_p2/ProviderQPSSpike; 已触发; no earlier decision on this alert Thread' } : {},
+    rule_assessments: [{ rule_id: 'tencent-alert', matched: decision === 'accept', reason: decision === 'accept' ? 'A firing Prometheus alarm' : 'A repeat' }],
+    direction: { implementation_requested: true, target_basis: 'existing-standard', requires_design_decision: false, evidence: 'QPS more than 3x the rate 15 minutes before' } })
+  const candidates = (next: Runtime) => relays(next.masterId).filter(relay => relay.kind === 'candidate')
+  it('accepts a firing Prometheus alert card once, groups its still-firing repeat into the ticket, and replies in the first alert\'s thread', async () => {
+    const next = await alertDeployment()
+    const trigger = alertTrigger(qpsFiring)
+    expect(trigger.threads[0]!.id).toMatch(new RegExp(`^${TENCENT_CHAT}:alert:[0-9a-f]{16}$`))
+    await receive(trigger, next)
+    expect(candidates(next)).toEqual([expect.objectContaining({ trigger_id: trigger.id, strength: 'inferred' })])
+    vi.spyOn(Commands.prototype, 'lark').mockResolvedValue({ items: [{ message_id: 'om_qpsfiring', chat_id: TENCENT_CHAT }] })
+    const details = await runTool(next.masterId, 'orchestrator_eval', { trigger_id: trigger.id })
+    expect(details).toMatchObject({ text: expect.stringContaining('告警策略: example_alerts_p2/ProviderQPSSpike'), source: { thread: threadKey(trigger.threads[0]!) } })
+    expect(details).not.toHaveProperty('thread_decisions')
+    const accepted = await runTool(next.masterId, 'orchestrator_eval_decide', qpsDecision(trigger.id))
+    const ticket = next.store.tickets.get((accepted.ticket as { ticket_id: string }).ticket_id)!
+    expect(ticket.mandate).toMatchObject({ strength: 'inferred', basis: expect.objectContaining({ via: 'bot', rules: ['tencent-alert'] }) })
+    await next.idle()
+    // The still-firing repeat of the same policy and object, with another measurement, reaches the ticket and no assessment.
+    deliveries.mockClear()
+    const repeat = alertTrigger(qpsOngoing)
+    expect(repeat.threads[0]).toEqual(trigger.threads[0])
+    await receive(repeat, next)
+    expect(candidates(next)).toEqual([])
+    expect(next.store.decisions.byThread(threadKey(trigger.threads[0]!)).at(-1))
+      .toMatchObject({ kind: 'ignore', reason: [expect.objectContaining({ code: 'alert_repeat', triggerId: repeat.id })] })
+    expect(next.store.tickets.get(ticket.id)!.inputs).toContainEqual(expect.objectContaining({ kind: 'trigger', triggerId: repeat.id }))
+    expect(next.store.tickets.list()).toHaveLength(1)
+    await runTool(`worker-${ticket.id}`, 'orchestrator_report', { state: 'ready', summary: '结论：供应商 A 故障，流量 fallback 到 provider-a（中）。' })
+    expect(await runTool(next.masterId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'result', text: '**结论**：供应商 A 故障导致 fallback（置信度中）。' }))
+      .toEqual({ status: 'sent' })
+    const replies = vi.mocked(Commands.prototype.lark).mock.calls.map(([args]) => args).filter(args => args[1] === '+messages-reply')
+    expect(replies).toEqual([expect.arrayContaining(['--message-id', 'om_qpsfiring', '--reply-in-thread'])])
+  })
+  it('in observe mode records a would-accept, shows it to the assessor of a repeat, and ignores the recovery card without an assessment', async () => {
+    const next = await alertDeployment()
+    await next.settings.save('eval', { mode: 'observe', timeoutSeconds: 120, model: null }, next.store.blockRevision('eval'), 'panel')
+    deliveries.mockClear()
+    const trigger = alertTrigger(qpsFiring)
+    await receive(trigger, next)
+    vi.spyOn(Commands.prototype, 'lark').mockResolvedValue({ items: [{ message_id: 'om_qpsfiring', chat_id: TENCENT_CHAT }] })
+    await runTool(next.masterId, 'orchestrator_eval', { trigger_id: trigger.id })
+    expect(await runTool(next.masterId, 'orchestrator_eval_decide', qpsDecision(trigger.id)))
+      .toMatchObject({ decision: 'ignore', reason: expect.stringContaining('Observe mode') })
+    expect(next.store.tickets.list()).toEqual([])
+    const repeat = alertTrigger(qpsOngoing)
+    await receive(repeat, next)
+    expect(candidates(next).at(-1)).toMatchObject({ trigger_id: repeat.id })
+    const details = await runTool(next.masterId, 'orchestrator_eval', { trigger_id: repeat.id })
+    expect(details.thread_decisions).toEqual([expect.objectContaining({ kind: 'ignore', would_accept: true, title: QPS_TITLE,
+      reason: expect.stringContaining('Observe mode') })])
+    expect(await runTool(next.masterId, 'orchestrator_eval_decide', qpsDecision(repeat.id, 'ignore'))).toMatchObject({ decision: 'ignore' })
+    deliveries.mockClear()
+    const recovery = alertTrigger(qpsRecovered)
+    await receive(recovery, next)
+    expect(candidates(next)).toEqual([])
+    expect(next.store.decisions.byThread(threadKey(trigger.threads[0]!)).at(-1))
+      .toMatchObject({ kind: 'ignore', reason: [expect.objectContaining({ code: 'alert_recovered' })] })
+    expect(vi.mocked(Commands.prototype.lark).mock.calls.map(([args]) => args).filter(args => ['+messages-reply', '+messages-send'].includes(String(args[1])))).toEqual([])
+  })
+  it('makes a fallback-page alert an inferred candidate, which the kit\'s enabled rule ignores while fallback-page is off', async () => {
+    const next = await alertDeployment()
+    const trigger = alertTrigger(fallback404)
+    expect(trigger.meta.alert).toMatchObject({ kind: 'fallback-page', status: 'firing' })
+    await receive(trigger, next)
+    expect(candidates(next)).toEqual([expect.objectContaining({ trigger_id: trigger.id, strength: 'inferred' })])
+    expect(kitPolicy().rules.map(rule => [rule.id, (rule as { enabled?: boolean }).enabled])).toEqual([['tencent-alert', true], ['fallback-page', false]])
+  })
+})
 it('reports each setup problem where the operator fixes it, and checks the agent CLI the way worker shells run it', async () => {
   const needs = async (place: string, code: string, values: Record<string, string>, accounts: Accounts = {}) => {
     const next = await restart({}, accounts)

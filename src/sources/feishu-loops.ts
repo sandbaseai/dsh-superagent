@@ -4,6 +4,7 @@ import { createInterface } from 'node:readline'
 import { setTimeout as delay } from 'node:timers/promises'
 import { z } from 'zod'
 import { threadKey, type Thread, type Trigger } from '../core/index.ts'
+import { isAlertThread, type FeishuAlert } from './feishu-alert.ts'
 import { feishuChatLink } from './feishu-channel.ts'
 import type { FeishuBot } from '../deployment.ts'
 import { validItems, type Tally } from '../infra/commands.ts'
@@ -29,7 +30,11 @@ async function receive(ctx: SourceContext, trigger: Trigger): Promise<void> {
   if (!chatId) return
   const name = ctx.state.get(KV.sources.labels(SOURCE))?.[chatId] ?? chatId
   const chat = trigger.meta.direct === true ? { value: { zh: '私聊', en: 'Direct message' } } : { value: name }
-  for (const ref of trigger.threads) ctx.threads.describe(threadKey(ref), { url: chatLink(ctx, chatId), facts: { chat } })
+  const alert = trigger.meta.alert as FeishuAlert | undefined
+  for (const ref of trigger.threads) {
+    const label = alert && isAlertThread(ref.id) ? { label: `${alert.policy} · ${alert.object}` } : {}
+    ctx.threads.describe(threadKey(ref), { ...label, url: chatLink(ctx, chatId), facts: { chat } })
+  }
 }
 const chatLink = (ctx: SourceContext, chatId: string): string => feishuChatLink(ctx.deployment.feishu?.brand ?? 'feishu', chatId)
 function available(ctx: SourceContext): boolean {
@@ -219,6 +224,8 @@ export async function pollThreads(ctx: SourceContext, signal?: AbortSignal, tall
   await pollEach(ctx, SOURCE, () => !!signal?.aborted, thread => pollThread(ctx, thread, signal, tally))
 }
 async function pollThread(ctx: SourceContext, thread: Thread, signal?: AbortSignal, tally?: Tally): Promise<void> {
+  // An alert Thread groups notices from the chat history; it has no Feishu topic of its own to read.
+  if (isAlertThread(thread.ref.id)) return
   const ref = threadRef(ctx, thread)
   if (!ref) throw new Error('Subscribed thread has no retained source message')
   const config = enabled(ctx)

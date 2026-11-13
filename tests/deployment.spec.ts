@@ -45,8 +45,11 @@ describe('configuration schema', () => {
     const read = machineOf(Config({ stateDir: join(dir, 'state') }))
     // Limits are volatile references that the loader updates in place and callers read when used.
     expect({ ...read, promptMaxChars: read.promptMaxChars.get(), admissionContextMaxPages: read.admissionContextMaxPages.get(),
-      admissionContextTimeoutMs: read.admissionContextTimeoutMs.get() })
-      .toEqual({ stateDir: join(dir, 'state'), promptMaxChars: 100000, admissionContextMaxPages: 10, admissionContextTimeoutMs: 15000 })
+      admissionContextTimeoutMs: read.admissionContextTimeoutMs.get(), trustedHosts: read.trustedHosts.get() })
+      .toEqual({ stateDir: join(dir, 'state'), promptMaxChars: 100000, admissionContextMaxPages: 10, admissionContextTimeoutMs: 15000,
+        trustedHosts: [] })
+    expect(machineOf(Config({ stateDir: join(dir, 'state'), trustedHosts: ['ops.example.com'] })).trustedHosts.get()).toEqual(['ops.example.com'])
+    expect(() => Config({ stateDir: join(dir, 'state'), trustedHosts: ['ops.example.com/dsh'] })).toThrow()
     expect(() => Config(minimal({ stateDir: 'relative/dir' }))).toThrow()
     expect(() => Config(minimal({ stateDir: '~/dir' }))).toThrow()
   })
@@ -64,6 +67,16 @@ describe('setup', () => {
     expect(deployment).not.toHaveProperty('feishu')
     // A renamed repository is still resolved by its old name; notifications carry GitHub's current full_name.
     expect((await resolveDeployment(machine(), { repository: 'acme/gadgets', cli: 'gh' }, probe, path)).repository).toBe('acme/widgets')
+  })
+  it('resolves a deployment without GitHub when the GitHub Source names neither a repository nor a CLI', async () => {
+    const spy = vi.fn<Probe>(probe)
+    for (const github of [{}, undefined, { repository: ' ', cli: '' }]) {
+      const base = machine()
+      const deployment = await resolveDeployment(base, github, spy, path)
+      expect(deployment).toEqual({ ...base, repository: '' })
+      expect(deployment).not.toHaveProperty('github')
+    }
+    expect(spy).not.toHaveBeenCalled()
   })
   it('names what setup needs and where it is set', async () => {
     const needs = (place: string, code: string, values: Record<string, unknown>, github: unknown) =>

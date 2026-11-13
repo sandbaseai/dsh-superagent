@@ -325,6 +325,12 @@ describe('feishu source', () => {
   })
 })
 describe('github source', () => {
+  it('gives empty environment values and no facts to a deployment without GitHub', () => {
+    expect(githubKind.environment!.values({ deployment: testDeployment({ repository: '', github: undefined }), config: {} as never })).toEqual({
+      DSH_SUPERAGENT_GITHUB_REPOSITORY: '', DSH_SUPERAGENT_GITHUB_ACCOUNT: '', DSH_SUPERAGENT_GITHUB_COMMIT_EMAIL: '', DSH_SUPERAGENT_GITHUB_NUMBER: '',
+      DSH_SUPERAGENT_GITHUB_PR_HEAD: '' })
+    expect(githubKind.facts!(testDeployment({ github: undefined }))).toEqual({})
+  })
   it('normalizes comments and reviews into triggers with review-thread channels, and marks only GitHub Apps and machine accounts as automated', () => {
     const trigger = commentTrigger({ id: 5, body: 'nit', user: { login: 'review-bot[bot]', type: 'Bot' }, html_url: 'https://github.com/acme/widgets/pull/7#discussion_r5', updated_at: '2026-09-01T00:00:00Z' }, { number: 7, isPr: true, prAuthor: 'agent-bot' }, 'inline', 'agent-bot')
     expect(trigger).toMatchObject({ source: 'github', threads: [{ source: 'github', id: '7' }], human: false, channel: { address: { number: '7', url: 'https://github.com/acme/widgets/pull/7#discussion_r5' } }, meta: { commentId: 5, kind: 'inline', prAuthor: 'agent-bot' } })
@@ -779,6 +785,13 @@ describe('github source', () => {
       const off = await start({}, { enabled: false, config: {} })
       await vi.waitFor(() => expect(off.value.health.github).toMatchObject({ state: 'paused', code: 'sourceOff' }))
       await off.stop()
+      // A deployment without GitHub pauses the Source and never polls.
+      const poll = vi.spyOn(Commands.prototype, 'run')
+      const unset = await start({ deployment: testDeployment({ repository: '', github: undefined }) })
+      await vi.waitFor(() => expect(unset.value.health.github).toMatchObject({ state: 'paused', code: 'githubUnset' }))
+      expect(poll).not.toHaveBeenCalled()
+      await unset.stop()
+      poll.mockRestore()
       // Rounds fail, succeed, fail, fail: only the last two in a row make the error. A round reads through a Commands of its own.
       const outcomes = [false, true, false, false]
       let round = 0

@@ -1,0 +1,7 @@
+{
+  "model": { "provider": "anthropic-gateway", "model": "<worker model id>" },
+  "maxWorkers": 2,
+  "directory": "",
+  "prepare": "",
+  "blockedCommands": ["kubectl", "helm", "tccli", "curl", "wget", "ssh", "scp", "rsync", "docker", "terraform", "mysql", "psql", "redis-cli"]
+}

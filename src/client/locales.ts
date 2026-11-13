@@ -568,6 +568,8 @@ const TEXT = {
   'reason.not_a_member': ['发送者不在这个来源的名单里', 'Sender is not on this Source\'s list'],
   'reason.no_mention': ['没有点名智能体，且这个来源不接收其余消息', 'Does not address the agent, and this Source does not receive the rest'],
   'reason.admission_ignored': ['准入设为忽略', 'Admission set to ignore'],
+  'reason.alert_recovered': ['告警恢复通知', 'Alert recovery notice'],
+  'reason.alert_repeat': ['同一告警已有进行中的工单', 'Repeat of an alert with an open ticket'],
   'reason.chat_not_allowed': ['群不在监听的群里', 'Chat is not a listened chat'],
   'reason.direct_messages_not_allowed': ['私聊未开放', 'Direct messages are off'],
   'reason.observation_only': ['仅观察的群（旧版过滤）', 'Observe-only chat (legacy filter)'],
@@ -744,6 +746,7 @@ const TEXT = {
   'healthCode.setupPending': ['等待部署检查', HEALTH_TEXT.setupPending],
   'healthCode.sourceOff': ['已关闭', HEALTH_TEXT.sourceOff],
   'healthCode.feishuCliUnset': ['来源已打开，还没有设置机器人的 lark-cli', HEALTH_TEXT.feishuCliUnset],
+  'healthCode.githubUnset': ['GitHub 来源没有设置仓库和智能体 CLI，GitHub 未启用', HEALTH_TEXT.githubUnset],
   'healthCode.feishuBotMissing': ['等待飞书机器人', HEALTH_TEXT.feishuBotMissing],
   'healthCode.pollFailures': ['连续 {count} 次轮询失败，最近一次：{error}', HEALTH_TEXT.pollFailures],
 } as const satisfies Record<string, readonly [string, string]>

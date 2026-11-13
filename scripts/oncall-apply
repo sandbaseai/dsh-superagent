@@ -1,0 +1,218 @@
+#!/usr/bin/env python3
+"""Save the Feishu on-call kit (examples/feishu-cls-oncall) to a running dsh-superagent through its Management API.
+Fills the kit's placeholders from the arguments, refuses when one is left or an id is malformed, then saves the settings
+blocks `source:feishu`, `policy`, `eval` and `executor` in that order, waiting for the service to answer again after a save
+that restarts it, and finally the prompt configuration: team sections, the `oncall-alerts` skill and three overrides of
+built-in parts, each with the base it was written against. `--dry-run` prints the request bodies and sends nothing. Exit 0 when everything was saved, 1 when the
+service refused or did not answer, and 2 for invalid arguments or an incomplete kit.
+"""
+import argparse
+import copy
+import json
+from pathlib import Path
+import re
+import sys
+import time
+import urllib.error
+import urllib.request
+ROOT = Path(__file__).resolve().parent.parent
+CHAT_ID = re.compile(r'^oc_[a-zA-Z0-9]+$')
+BOT_ID = re.compile(r'^(cli|ou)_[a-zA-Z0-9]+$')
+PLACEHOLDER = re.compile(r'<[^<>\s][^<>]*>')
+# Settings blocks in the order they are saved, with the kit file of each.
+BLOCKS = [('source:feishu', 'source-feishu.json'), ('policy', 'policy.json'), ('eval', 'eval.json'), ('executor', 'executor.json')]
+OVERRIDES = {'runtime/worker': 'runtime-worker.md', 'runtime/work': 'runtime-work.md', 'runtime/admission': 'runtime-admission.md'}
+SKILLS = {'oncall-alerts': 'oncall-alerts.md'}
+# The built-in base key of each overridden part, as Prompts.validate computes it from the text the kit was written against.
+BASES = 'bases.json'
+POLL_SECONDS = 2
+RESTART_WAIT_SECONDS = 120
+class Invalid(Exception):
+    """Invalid arguments or an incomplete kit (exit 2)."""
+class Refused(Exception):
+    """The service refused a request or did not answer (exit 1)."""
+def ids(value, pattern, what):
+    """Split a comma-separated list and refuse an empty, malformed or repeated id."""
+    items = [item.strip() for item in value.split(',') if item.strip()]
+    if not items:
+        raise Invalid(what + ' needs at least one id')
+    for item in items:
+        if not pattern.match(item):
+            raise Invalid(what + ' ' + item + ' does not match ' + pattern.pattern)
+    if len(set(items)) != len(items):
+        raise Invalid(what + ' lists an id twice')
+    return items
+def read_text(path):
+    """Return a kit file's text without trailing whitespace."""
+    try:
+        return path.read_text(encoding='utf-8').rstrip()
+    except OSError as error:
+        raise Invalid('cannot read ' + str(path) + ': ' + error.strerror)
+def read_json(path):
+    """Return a kit file parsed as JSON."""
+    try:
+        return json.loads(read_text(path))
+    except ValueError as error:
+        raise Invalid(str(path) + ' is not JSON: ' + str(error))
+def placeholders(value):
+    """Return every `<...>` placeholder left in the strings of a JSON value."""
+    if isinstance(value, str):
+        return PLACEHOLDER.findall(value)
+    if isinstance(value, list):
+        return [found for item in value for found in placeholders(item)]
+    if isinstance(value, dict):
+        return [found for item in value.values() for found in placeholders(item)]
+    return []
+def settings_values(kit, args):
+    """Return the settings blocks of the kit, in save order, with the arguments filled in."""
+    values = {block: read_json(kit / 'settings' / name) for block, name in BLOCKS}
+    chats = ids(args.alert_chat, CHAT_ID, '--alert-chat')
+    bots = ids(args.alert_bot, BOT_ID, '--alert-bot')
+    if not args.lark_cli.strip():
+        raise Invalid('--lark-cli needs a command name or an absolute path')
+    feishu = values['source:feishu']['config']
+    feishu['cli'] = args.lark_cli.strip()
+    # The kit's chat row is a template: one row per alert chat.
+    row = feishu['chats'][0]
+    feishu['chats'] = [dict(copy.deepcopy(row), chatId=chat) for chat in chats]
+    part = values['policy']['sources']['feishu']
+    bot = part['bots'][0]
+    part['bots'] = [dict(copy.deepcopy(bot), id=identifier) for identifier in bots]
+    if args.mode:
+        values['eval']['mode'] = args.mode
+    if args.router_model:
+        values['eval']['model']['model'] = args.router_model
+    if args.worker_model:
+        values['executor']['model']['model'] = args.worker_model
+    # The kit's models are placeholders for the ids the profile's route declares.
+    for block, flag in (('eval', '--router-model'), ('executor', '--worker-model')):
+        if placeholders(values[block]['model']['model']):
+            raise Invalid('pass ' + flag + ' with a model id the profile\'s anthropic-gateway route lists')
+    for block, value in values.items():
+        left = placeholders(value)
+        if left:
+            raise Invalid('the ' + block + ' block still has placeholders: ' + ', '.join(sorted(set(left))))
+    return [(block, values[block]) for block, _ in BLOCKS]
+def prompt_config(kit):
+    """Return the kit's prompt configuration: team sections, team skills and overrides of built-in parts."""
+    sections = {name: read_text(kit / 'prompts' / (name + '.md')) for name in ('communication', 'scope', 'delivery')}
+    skills = {name: read_text(kit / 'skills' / file) for name, file in SKILLS.items()}
+    # Each override carries the key of the built-in text it was written against, so a dsh-superagent whose built-in part
+    # changed since then shows 'Default updated' for it instead of stamping its own text as the base.
+    bases = read_json(kit / 'overrides' / BASES)
+    missing = [part for part in OVERRIDES if not isinstance(bases.get(part), str) or not bases[part]]
+    if missing:
+        raise Invalid(BASES + ' has no base for ' + ', '.join(missing))
+    overrides = {part: {'text': read_text(kit / 'overrides' / file), 'base': bases[part]} for part, file in OVERRIDES.items()}
+    return dict(sections, skills=skills, overrides=overrides)
+class Api:
+    """The Management API of one dsh-superagent at `url`."""
+    def __init__(self, url):
+        self.base = url.rstrip('/') + '/orchestrator/api/'
+    def call(self, method, path, body=None):
+        """Send one request and return its JSON answer; raise Refused with the server's error on a refusal."""
+        data = None if body is None else json.dumps(body, ensure_ascii=False).encode('utf-8')
+        headers = {'x-orchestrator-request': '1', 'accept': 'application/json'}
+        if data is not None:
+            headers['content-type'] = 'application/json'
+        request = urllib.request.Request(self.base + path, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return json.loads(response.read().decode('utf-8') or 'null')
+        except urllib.error.HTTPError as error:
+            raise Refused(method + ' ' + path + ' answered ' + str(error.code) + ': ' + refusal(error.read()))
+        except (urllib.error.URLError, OSError, ValueError) as error:
+            raise Refused(method + ' ' + path + ' failed: ' + str(getattr(error, 'reason', error)))
+    def answers(self):
+        """Return whether `GET state` answers now."""
+        try:
+            self.call('GET', 'state')
+            return True
+        except Refused:
+            return False
+def refusal(raw):
+    """Return the server's `error` and `setup` text from a refusal body."""
+    try:
+        body = json.loads(raw.decode('utf-8'))
+    except ValueError:
+        return raw.decode('utf-8', 'replace')[:500]
+    if not isinstance(body, dict):
+        return str(body)[:500]
+    parts = [str(body.get('error') or '')]
+    setup = body.get('setup')
+    if setup:
+        parts.append('setup: ' + (setup.get('detail') or setup.get('code') or '') if isinstance(setup, dict) else 'setup: ' + str(setup))
+    for issue in body.get('issues') or []:
+        parts.append('issue at ' + '.'.join(str(step) for step in issue.get('path') or []) + ': ' + str(issue.get('message')))
+    return '; '.join(part for part in parts if part)
+def revisions(api):
+    """Return the current revision of every settings block the kit saves, from `GET settings`."""
+    view = api.call('GET', 'settings')
+    found = {name: view['blocks'][name]['revision'] for name in ('policy', 'eval', 'executor')}
+    for source in view.get('sources') or []:
+        if source.get('id') == 'feishu':
+            if not source.get('installed', True):
+                raise Refused('the Feishu Source is not installed: enable the dsh-superagent-feishu entry in the profile')
+            found['source:feishu'] = source['revision']
+    if 'source:feishu' not in found:
+        raise Refused('the service has no Feishu Source: enable the dsh-superagent-feishu entry in the profile')
+    return found
+def wait_for_restart(api):
+    """Wait until the service answers `GET state` again after a save that restarts it."""
+    deadline = time.monotonic() + RESTART_WAIT_SECONDS
+    while True:
+        time.sleep(POLL_SECONDS)
+        if api.answers():
+            return
+        if time.monotonic() >= deadline:
+            raise Refused('the service did not answer within ' + str(RESTART_WAIT_SECONDS) + ' s of restarting')
+def apply(api, blocks, config):
+    """Save the settings blocks in order, then the prompt configuration."""
+    current = revisions(api)
+    for block, value in blocks:
+        answer = api.call('PUT', 'settings/' + block, {'value': value, 'revision': current[block]})
+        restarting = bool(answer.get('restarting'))
+        print('saved ' + block + ' revision ' + str(answer.get('revision')) + (' (restarting)' if restarting else ''))
+        current[block] = answer.get('revision', current[block])
+        if restarting:
+            wait_for_restart(api)
+            current = revisions(api)
+    prompts = api.call('GET', 'prompts')
+    answer = api.call('PUT', 'prompts', {'config': config, 'baseRevision': prompts['current']['revision']})
+    print('saved prompts revision ' + str(answer.get('revision')))
+def main():
+    """Parse the arguments, then print or save the kit."""
+    parser = argparse.ArgumentParser(description='Save the Feishu on-call kit through the dsh-superagent Management API.')
+    parser.add_argument('--url', default='http://127.0.0.1:3082', help='the panel URL (default http://127.0.0.1:3082)')
+    parser.add_argument('--kit', default=str(ROOT / 'examples' / 'feishu-cls-oncall'), help='the kit directory')
+    parser.add_argument('--lark-cli', required=True, help="the bot's bot-only lark-cli: a command name or an absolute path")
+    parser.add_argument('--alert-chat', required=True, help='alert chat ids, comma-separated (oc_...)')
+    parser.add_argument('--alert-bot', required=True, help='the alarm bots\' sender ids, comma-separated (cli_... or ou_...)')
+    parser.add_argument('--mode', choices=('observe', 'auto'), help="the Eval accept mode (default: the kit's, observe)")
+    parser.add_argument('--router-model', help="the main Session's model id on the kit's provider; required while the kit's "
+                        'model is a placeholder')
+    parser.add_argument('--worker-model', help="the workers' model id on the kit's provider; required while the kit's model "
+                        'is a placeholder')
+    parser.add_argument('--dry-run', action='store_true', help='print the request bodies and send nothing')
+    args = parser.parse_args()
+    try:
+        kit = Path(args.kit)
+        blocks = settings_values(kit, args)
+        config = prompt_config(kit)
+        if args.dry_run:
+            for block, value in blocks:
+                print('--- PUT settings/' + block)
+                print(json.dumps({'value': value, 'revision': None}, ensure_ascii=False, indent=2))
+            print('--- PUT prompts')
+            print(json.dumps({'config': config, 'baseRevision': None}, ensure_ascii=False, indent=2))
+            return 0
+        apply(Api(args.url), blocks, config)
+        return 0
+    except Invalid as error:
+        sys.stderr.write('refused: ' + str(error) + '\n')
+        return 2
+    except Refused as error:
+        sys.stderr.write('error: ' + str(error) + '\n')
+        return 1
+if __name__ == '__main__':
+    sys.exit(main())

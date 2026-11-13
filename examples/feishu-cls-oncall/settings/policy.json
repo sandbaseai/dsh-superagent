@@ -1,0 +1,29 @@
+{
+  "rules": [
+    {
+      "id": "tencent-alert",
+      "name": "Tencent Cloud alert investigation",
+      "enabled": true,
+      "instruction": "A message from a bot on the Feishu bots list, in a configured alert chat, that reports a Tencent Cloud Observability alarm firing (a 腾讯云可观测平台告警 card whose status is 已触发 or 持续触发: Prometheus告警 or 云产品监控告警) or a firing CLS alarm is a request for a read-only investigation of that alarm and one reply in its thread. For this rule, implementation_requested=true means that investigation, target_basis=existing-standard (the alarm condition against the service's normal state), and requires_design_decision=false. Accept silently: no acknowledgement. Title the ticket 告警策略 · 告警对象 without the measurement, for example example_alerts_p2/ProviderQPSSpike · 供应商 provider-a 流量突增. The host already ignores recovery notices. Ignore a site fallback-page alert (【… 兜底页告警】); the fallback-page rule decides those. Ignore a repeat: the candidate's thread_decisions or related_tickets show an accept, a would-accept (observe mode) or a ticket created within the last 6 hours on this alert Thread; give the earlier decision's time in the reason. Ignore test messages and summaries. The worker stays read-only: no writes, restarts, rollbacks, scaling, deploys, configuration or permission changes, PRs, commits or pushes; it reads only through dsh-oncall (envs, cls, prom, monitor, kube, grafana) and read-only lark-cli calls, and reports ready with the analysis, or dropped when nothing is left for a human."
+    },
+    {
+      "id": "fallback-page",
+      "name": "Site fallback-page alert investigation",
+      "enabled": false,
+      "instruction": "A message from a bot on the Feishu bots list, in a configured alert chat, that is a site fallback-page alert (【… 兜底页告警】, 类型 404 页面不存在 or 页面错误) is a request for a read-only investigation of that page and one reply in its thread: whether the page should exist, where the visitors came from (来源), whether the same page keeps failing, and for 页面错误 which script error and release it points to. For this rule, implementation_requested=true means that investigation, target_basis=existing-standard (the site's published pages and their normal behaviour), and requires_design_decision=false. Accept silently: no acknowledgement. Title the ticket 类型 · 页面 without the query string. Ignore a repeat of the same page within the last 6 hours, shown by the candidate's thread_decisions or related_tickets, and crawler or scanner traffic the message itself shows. The worker stays read-only: no writes, restarts, rollbacks, scaling, deploys, configuration or permission changes, PRs, commits or pushes; it reads only through dsh-oncall (envs, cls, prom, monitor, kube, grafana) and read-only lark-cli calls, and reports ready with the analysis, or dropped when nothing is left for a human."
+    }
+  ],
+  "sources": {
+    "feishu": {
+      "allowed": [],
+      "syncChat": "",
+      "bots": [
+        {
+          "id": "<cli_alert_bot>",
+          "name": "腾讯云告警"
+        }
+      ],
+      "admission": {}
+    }
+  }
+}
