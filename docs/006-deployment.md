@@ -245,7 +245,7 @@ From an allowed GitHub account, open an Issue or post a comment containing `@<ag
 scripts/dsh-superagent-deploy --state-dir <stateDir> --profile superagent --url http://127.0.0.1:3082 [--dry-run] [<commit>]
 ```
 
-It refuses a checkout with uncommitted changes and a commit that is not on `--branch` (default `origin/main`), and deploys that branch's tip when no commit is given. It builds the target while the service keeps running the previous build, so a failed build never stops the service. It then backs up the database (the newest ten backups are kept in `<stateDir>/../backups`), restarts, and requires `status` exit 0. On failure it checks out and rebuilds the previous commit, restores the database and starts the service again. Each run appends one line to `~/deploy.log`. It exits 0 when deployed or already current, 1 when it failed and rolled back, 2 when it refused before changing anything, and 3 when the rollback failed too.
+It refuses a checkout with uncommitted changes, an untracked file where the target adds a tracked one, and a commit that is not on `--branch` (default `origin/main`), and deploys that branch's tip when no commit is given. It builds the target while the service keeps running the previous build, so a failed build never stops the service. It then backs up the database (the newest ten backups are kept in `<stateDir>/../backups`), restarts, and requires `status` exit 0. On failure it checks out and rebuilds the previous commit, restores the database and starts the service again. Each run appends one line to `~/deploy.log`. It exits 0 when deployed or already current, 1 when it failed and rolled back, 2 when it refused before changing anything, and 3 when the rollback failed too.
 
 By hand:
 

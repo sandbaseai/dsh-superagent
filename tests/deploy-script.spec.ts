@@ -94,6 +94,16 @@ it('refuses an unmerged commit, an unknown ref, and a checkout with uncommitted 
   expect(existsSync(join(root, 'service.log'))).toBe(false)
 })
 
+it('refuses before any change when an untracked file is where the target adds one', async () => {
+  const v1 = commit('VERSION', 'v1')
+  commit('NEW', 'tracked in v2'); git(work, 'checkout', '-q', '--detach', v1)
+  writeFileSync(join(work, 'NEW'), 'a local copy')
+  expect(await deploy()).toMatchObject({ code: 2, stderr: expect.stringContaining('untracked files would be overwritten by the target commit: NEW') })
+  expect(head()).toBe(v1)
+  expect(existsSync(join(root, 'service.log'))).toBe(false)
+  expect(existsSync(join(root, 'deploy.log'))).toBe(false)
+})
+
 it('keeps the running service when the build fails, and returns to the previous commit', async () => {
   const v1 = commit('VERSION', 'v1'); git(work, 'checkout', '-q', '--detach', v1); writeFileSync(join(work, 'BUILT'), 'v1')
   const bad = commit('VERSION', 'broken'); git(work, 'checkout', '-q', '--detach', v1)
