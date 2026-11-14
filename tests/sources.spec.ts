@@ -4,7 +4,7 @@ import { backfillChat, consumerRetry, feishuKind, feishuTriggerId, feishuRef, fe
   from '../src/sources/feishu.ts'
 import { KV } from '../src/kv.ts'
 import { apply as applyFeishu, pollThreads as pollFeishuThreads } from '../src/sources/feishu.ts'
-import { runFeishu } from '../src/sources/feishu-loops.ts'
+import { HISTORY_OVERLAP_MS, runFeishu } from '../src/sources/feishu-loops.ts'
 import { commentTrigger, githubAddress, githubChannel, issueTrigger, type GithubComment, type GithubIssue } from '../src/sources/github-trigger.ts'
 import { claimPull, observePull, pullEndNotices, pullOf, ticketBranch, type Pull } from '../src/sources/github-pull.ts'
 import { ciCounts, ciFact, ciSummary } from '../src/sources/github-read.ts'
@@ -1155,6 +1155,29 @@ describe('feishu event consumer', () => {
     const off = await recovered(false)
     expect(off.chats).toEqual(['oc_a', 'oc_b'])
     expect(off.cursors.oc_dm).toBe(hour)
+  }, 20_000)
+  it('reads again the last ten minutes of history, so a message the API lists late is not skipped', async () => {
+    const { ctx, health, store } = consumerSource(cli('ready'), { chats: [{ chatId: 'oc_a', listen: 'all' }] })
+    const hour = new Date(Date.now() - 3_600_000).toISOString()
+    store.set(KV.feishu.history('oc_a'), hour)
+    const windows: { start: number, end: number }[] = []
+    const lark = vi.spyOn(Commands.prototype, 'lark').mockImplementation(async args => {
+      if (args[2] !== '/open-apis/im/v1/messages') return { has_more: false, items: [] }
+      const params = JSON.parse(args.at(-1)!) as { start_time: string, end_time: string }
+      windows.push({ start: Number(params.start_time) * 1000, end: Number(params.end_time) * 1000 })
+      return { has_more: false, items: [] }
+    })
+    const stop = new AbortController()
+    const loops = runFeishu(ctx, AbortSignal.any([stop.signal, controller.signal]))
+    await vi.waitFor(() => expect(health.history?.state).toBe('ready'), until)
+    stop.abort(); await loops; lark.mockRestore()
+    const cursor = Date.parse(store.get(KV.feishu.history('oc_a'))!)
+    store.close()
+    // The round read up to its start; the next one starts HISTORY_OVERLAP_MS before that, so a message sent in the
+    // round's last minutes and listed by the API only afterwards is read then.
+    expect(windows).toHaveLength(1)
+    expect(windows[0]!.end - cursor).toBeGreaterThanOrEqual(HISTORY_OVERLAP_MS - 1000)
+    expect(windows[0]!.end - cursor).toBeLessThanOrEqual(HISTORY_OVERLAP_MS + 1000)
   }, 20_000)
   it('reports an error when the consumer is not ready within 45 seconds', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
