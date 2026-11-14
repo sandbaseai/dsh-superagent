@@ -13,7 +13,14 @@ import { feishuRef, feishuTime, feishuTrigger, HistoricalMessageSchema, historyE
   from './feishu-trigger.ts'
 import { health, type SourceContext } from './host.ts'
 import { KV } from '../kv.ts'
-import { cursorAt, POLL_HORIZON_MS, polled, pollThreads as pollEach } from './poll.ts'
+import { POLL_HORIZON_MS, polled, pollThreads as pollEach } from './poll.ts'
+/**
+ * How far each history round reaches back before the previous round's start. Feishu's history API can list a message some
+ * seconds after it was sent; a round that ends in that gap moves past it, and when the live event stream is down too (as
+ * it is for another bot's messages) the message is never read. Trigger IDs deduplicate what the overlap reads again.
+ */
+export const HISTORY_OVERLAP_MS = 10 * 60_000
+const historyCursorAt = (started: string): string => new Date(Date.parse(started) - HISTORY_OVERLAP_MS).toISOString()
 import type { FeishuConfig } from './feishu.ts'
 
 export const runFeishu = (ctx: SourceContext, signal: AbortSignal): Promise<unknown> =>
@@ -153,7 +160,7 @@ async function backfillLoop(ctx: SourceContext, signal: AbortSignal): Promise<vo
       if (since === undefined) { ctx.state.set(cursorKey, started); continue }
       try {
         await backfillChat(ctx, chatId, direct, since, started, signal, tally)
-        if (!signal.aborted) ctx.state.set(cursorKey, cursorAt(started))
+        if (!signal.aborted) ctx.state.set(cursorKey, historyCursorAt(started))
       } catch (error) { if (!signal.aborted) errors.push(`${chatId}: ${String(error)}`) }
     }
     await pollThreads(ctx, signal, tally)
