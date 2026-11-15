@@ -1,6 +1,6 @@
 /** Tests for scripts/dsh-superagent-deploy in a temporary checkout with a bare origin, a stub pnpm and a stub service script. */
 import { execFileSync, execFile } from 'node:child_process'
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -41,6 +41,8 @@ beforeEach(() => {
 grep -q broken VERSION && { echo 'build error' >&2; exit 1; }
 cp VERSION BUILT
 `, { mode: 0o755 })
+  // The deploy script refuses to start unless the service script's own tools are on PATH.
+  for (const name of ['dsh', 'tmux']) writeFileSync(join(bin, name), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
   git(root, 'init', '-q', '--bare', '-b', 'main', origin)
   git(root, 'clone', '-q', origin, work)
   mkdirSync(join(work, 'scripts'))
@@ -53,9 +55,11 @@ cp VERSION BUILT
 })
 afterEach(() => { rmSync(root, { recursive: true, force: true }) })
 
-function deploy(...args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
-  return new Promise(resolve => execFile('python3', [join(work, 'scripts', 'dsh-superagent-deploy'), '--state-dir', state, '--profile', 'oncall', ...args],
-    { cwd: work, env: env(), timeout: 60_000 }, (error, stdout, stderr) => resolve({ code: typeof error?.code === 'number' ? error.code : 0, stdout, stderr })))
+/** Run the deploy script; a leading object overrides environment variables (such as PATH) for this run. */
+function deploy(...args: (string | Record<string, string>)[]): Promise<{ code: number; stdout: string; stderr: string }> {
+  const extra = typeof args[0] === 'object' ? args.shift() as Record<string, string> : {}
+  return new Promise(resolve => execFile('python3', [join(work, 'scripts', 'dsh-superagent-deploy'), '--state-dir', state, '--profile', 'oncall', ...args as string[]],
+    { cwd: work, env: { ...env(), ...extra }, timeout: 60_000 }, (error, stdout, stderr) => resolve({ code: typeof error?.code === 'number' ? error.code : 0, stdout, stderr })))
 }
 const head = () => git(work, 'rev-parse', 'HEAD')
 const built = () => readFileSync(join(work, 'BUILT'), 'utf8').trim()
@@ -99,6 +103,20 @@ it('refuses before any change when an untracked file is where the target adds on
   commit('NEW', 'tracked in v2'); git(work, 'checkout', '-q', '--detach', v1)
   writeFileSync(join(work, 'NEW'), 'a local copy')
   expect(await deploy()).toMatchObject({ code: 2, stderr: expect.stringContaining('untracked files would be overwritten by the target commit: NEW') })
+  expect(head()).toBe(v1)
+  expect(existsSync(join(root, 'service.log'))).toBe(false)
+  expect(existsSync(join(root, 'deploy.log'))).toBe(false)
+})
+
+it('refuses before any change when dsh or tmux is not on PATH, so the service is never stopped', async () => {
+  const v1 = commit('VERSION', 'v1')
+  commit('VERSION', 'v2'); git(work, 'checkout', '-q', '--detach', v1)
+  // Only git, python3 and pnpm: what a non-login ssh shell without ~/.local/bin would find.
+  const bare = join(root, 'bare-bin'); mkdirSync(bare)
+  for (const name of ['git', 'python3']) symlinkSync(execFileSync('which', [name], { encoding: 'utf8' }).trim(), join(bare, name))
+  symlinkSync(join(bin, 'pnpm'), join(bare, 'pnpm'))
+  const result = await deploy({ PATH: bare })
+  expect(result).toMatchObject({ code: 2, stderr: expect.stringContaining('dsh, tmux not found on PATH') })
   expect(head()).toBe(v1)
   expect(existsSync(join(root, 'service.log'))).toBe(false)
   expect(existsSync(join(root, 'deploy.log'))).toBe(false)
