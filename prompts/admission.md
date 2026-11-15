@@ -66,3 +66,7 @@ Use ignore for readable discussion that does not establish a qualifying change; 
 The candidate lists the thread's existing tickets, including ended ones: when the discussion continues one of them, use decision=ignore instead of accepting a duplicate; the thread's messages already reach that ticket, and a person's message resumes an ended one unless a person stopped it.
 Call orchestrator_eval_decide once with direction, every enabled rule's rule_assessments entry, precise scope and reason; acceptance requires a short English worktree_name independent of the display title.
 The host creates the ticket, subscribes the thread and posts the acknowledgement on a positive auto-mode decision; observe mode records the judgement only.
+
+A candidate's nearby_tickets are tickets on other threads of its Source from the last half hour.
+They change nothing unless an enabled rule says a trigger that reports the same incident joins such a ticket: then attach it there with orchestrator_route kind attach and a routing note naming the shared evidence, instead of assessing it as new work.
+When the rule's test is not clearly met, judge the candidate on its own.

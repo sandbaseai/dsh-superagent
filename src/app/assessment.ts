@@ -10,7 +10,7 @@ import type { Deployment } from '../deployment.ts'
 import { admissionContext } from '../sources/admission-context.ts'
 import { readRepositoryPath } from '../sources/github-read.ts'
 import type { TriggerContext } from '../sources/kind.ts'
-import { relatedTickets } from './cards.ts'
+import { relatedTickets, ticketCard } from './cards.ts'
 import { textPage } from './context.ts'
 import { AcknowledgementSchema } from './tools/tool.ts'
 import type { Effects } from './effects.ts'
@@ -184,7 +184,7 @@ export class MasterAssessor implements Assessor {
   }
   /**
    * Returns the `orchestrator_eval` payload: the trigger's text once (up to `TRIGGER_CHARS`), batch peers, related tickets
-   * on the thread, the Policy version its Eval was built from, and the initial thread window (first five messages and five
+   * on the thread, nearby tickets on other Threads of its Source, the Policy version its Eval was built from, and the initial thread window (first five messages and five
    * on either side of the trigger, truncated to `WINDOW_CHARS` or `NEAR_CHARS` for its two nearest neighbours with total
    * length and image IDs, plus other loaded messages as `STUB_CHARS` previews; `orchestrator_eval_read` reads any message
    * in full by ID).
@@ -226,6 +226,8 @@ export class MasterAssessor implements Assessor {
       }) } : {},
       // The rules are in the main Session's Policy section, which names the version the candidate's Eval was built from.
       ...relatedTickets(candidate.tickets), ...threadDecisions(candidate.decisions), policy_version: candidate.policyVersion,
+      // Tickets on other Threads of this Source from the last half hour, which a Trigger reporting the same incident may attach to.
+      ...candidate.nearby?.length ? { nearby_tickets: candidate.nearby.map(ticket => ({ ...ticketCard(ticket), created_at: ticket.createdAt })) } : {},
       thread }
   }
   /**

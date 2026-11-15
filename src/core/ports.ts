@@ -37,6 +37,11 @@ export interface Candidate {
   tickets: Ticket[]
   /** The latest Decisions on the thread, oldest first, at most five, for repeat judgement. */
   decisions?: Decision[]
+  /**
+   * Tickets of the same Source on other Threads created within `NEARBY_MS`, newest first, at most five, leaving out those a
+   * person stopped: candidates for attaching a Trigger that reports the same incident, such as alerts that fire together.
+   */
+  nearby?: Ticket[]
 }
 
 export type AssessmentOutcome =
