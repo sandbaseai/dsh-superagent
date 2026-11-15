@@ -53,8 +53,8 @@ describe('the kit settings', () => {
     expect(feishuKind.schema.parse(feishu!.config)).toMatchObject({ cli: '/home/oncall/.local/bin/lark-bot', directMessages: false, otherChats: 'none',
       chats: [{ chatId: 'oc_alerts1', listen: 'all' }, { chatId: 'oc_alerts2', listen: 'all' }] })
     const rules = PolicyConfigSchema.parse(policy).rules
-    // Only the alert rules, the fallback-page one disabled: the copy and visual defaults are not included.
-    expect(rules.map(rule => [rule.id, rule.enabled])).toEqual([['tencent-alert', true], ['fallback-page', false]])
+    // Only the alert rules, both enabled: the copy and visual defaults are not included.
+    expect(rules.map(rule => [rule.id, rule.enabled])).toEqual([['tencent-alert', true], ['fallback-page', true]])
     for (const rule of rules) expect(rule.instruction.length).toBeLessThanOrEqual(LIMITS.ruleInstruction)
     const { admission, ...part } = (policy as { sources: { feishu: Record<string, unknown> } }).sources.feishu
     expect(admission).toEqual({})

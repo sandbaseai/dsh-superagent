@@ -5,6 +5,8 @@ import { backfillChat, consumerRetry, feishuKind, feishuTriggerId, feishuRef, fe
 import { KV } from '../src/kv.ts'
 import { apply as applyFeishu, pollThreads as pollFeishuThreads } from '../src/sources/feishu.ts'
 import { HISTORY_OVERLAP_MS, runFeishu } from '../src/sources/feishu-loops.ts'
+import { conclusionOf, repeatNotice } from '../src/sources/feishu-repeat.ts'
+import { ALERT_CHAT, qpsFiring, qpsOngoing, qpsRecovered } from './fixtures/tencent-alerts.ts'
 import { commentTrigger, githubAddress, githubChannel, issueTrigger, type GithubComment, type GithubIssue } from '../src/sources/github-trigger.ts'
 import { claimPull, observePull, pullEndNotices, pullOf, ticketBranch, type Pull } from '../src/sources/github-pull.ts'
 import { ciCounts, ciFact, ciSummary } from '../src/sources/github-read.ts'
@@ -212,6 +214,49 @@ describe('feishu source', () => {
     const now = new Date().toISOString()
     await backfillChat(h, 'oc_team', false, new Date(Date.now() - 60_000).toISOString(), now, new AbortController().signal)
     expect(h.store.get('feishu-history-threads:oc_team')).toEqual({ omt_followed: old })
+    h.store.close()
+  })
+  it('answers a repeat of an analysed alarm with the earlier conclusion and its link, at most once per interval', async () => {
+    const h = host()
+    const alarm = (message: typeof qpsFiring, at: number) => feishuTrigger(historyEvent({ ...message, create_time: String(at),
+      ...message === qpsFiring ? {} : { message_id: `${message.message_id}-${at}` } }, ALERT_CHAT, false), 'ou_bot', 'cli_bot')!
+    const start = Date.parse('2026-11-15T06:00:00Z')
+    const first = alarm(qpsFiring, start)
+    h.store.triggers.save(first)
+    const alertThread = first.threads[0]!
+    h.store.threads.save({ key: `feishu:${alertThread.id}`, ref: alertThread, createdAt: first.at, subscriptions: ['analysed'], correlated: [], pending: [], meta: {} })
+    const summary = '**结论**: 供应商 provider-a 上游限流，置信度：高。\n**证据**: 429 占九成。\n**影响**: 无。'
+    h.store.tickets.save({ ...openTicket('analysed'), createdAt: first.at, origin: { triggerId: first.id, triggerIds: [first.id] },
+      ended: { at: first.at, by: 'executor', outcome: 'completed' },
+      assignments: [{ id: 'a1', state: 'ended', report: { state: 'ready', summary, at: first.at } } as never] })
+    vi.spyOn(h.commands, 'withSignal').mockReturnValue(h.commands)
+    const link = 'https://applink.feishu.cn/client/thread/open?open_thread_id=omt_1'
+    const lark = vi.spyOn(h.commands, 'lark').mockResolvedValue({ messages: [{ message_id: 'om_qpsfiring', chat_id: ALERT_CHAT, message_app_link: link }] })
+    const config = { repeatNoticeMinutes: 30, repeatWindowHours: 6 } as never
+    const notice = (trigger: Trigger) => h.store.receipts.get(key('repeat-notice', trigger.id))
+    const again = alarm(qpsOngoing, start + 10 * 60_000)
+    await repeatNotice(h, again, config)
+    expect(notice(again)).toMatchObject({ kind: 'notice', ticketId: 'analysed', channel: again.channel,
+      text: `同一告警 14:00 已分析过，6 小时内不再重复排查。\n**上次结论**: 供应商 provider-a 上游限流，置信度：高。\n[查看完整分析](${link})` })
+    expect(lark).toHaveBeenCalledWith(['im', '+messages-mget', '--message-ids', 'om_qpsfiring', '--no-reactions'])
+    // Within the interval, a recovery, the alarm that started the ticket, and a firing after the window get none.
+    const soon = alarm(qpsOngoing, start + 20 * 60_000)
+    await repeatNotice(h, soon, config)
+    const recovered = alarm(qpsRecovered, start + 50 * 60_000)
+    await repeatNotice(h, recovered, config)
+    await repeatNotice(h, first, config)
+    const late = alarm(qpsOngoing, start + 7 * 3600_000)
+    await repeatNotice(h, late, config)
+    expect([soon, recovered, first, late].map(notice)).toEqual([undefined, undefined, undefined, undefined])
+    // After the interval it answers again; without a link it names the time alone, and the setting at 0 sends nothing.
+    lark.mockRejectedValue(new Error('offline'))
+    const later = alarm(qpsOngoing, start + 45 * 60_000)
+    await repeatNotice(h, later, config)
+    expect(notice(later)?.text).not.toContain('[查看完整分析]')
+    const off = alarm(qpsOngoing, start + 90 * 60_000)
+    await repeatNotice(h, off, { repeatNoticeMinutes: 0, repeatWindowHours: 6 } as never)
+    expect(notice(off)).toBeUndefined()
+    expect(conclusionOf('**结论**\n多行\n结论\n**证据**: x')).toBe('多行 结论')
     h.store.close()
   })
   it('refuses a history page with a message outside its chat or topic, and a page token that does not advance', async () => {

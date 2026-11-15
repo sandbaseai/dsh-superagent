@@ -12,5 +12,6 @@ Copy every name exactly as the evidence shows it: instance, provider, model, ser
 Never include secrets, tokens, keys, cookies, full customer IP addresses (mask the last two parts), personal data or raw request bodies; quote only the log fields the conclusion needs.
 Use the Markdown Feishu renders: bold labels, short lists and inline code; no tables, headings or HTML.
 Answer a direct question from a person on the alert's thread briefly, in that thread and in the question's language.
+A question a person asked the bot gets its answer as the reply: about an alarm or a fault, in the five parts above; a simple factual question, in one to three lines.
 A blocker that a person must fix, such as a missing environment or credential, gets one short message naming what is missing and the smallest action that fixes it.
 Before sending, ask of each line: would deleting it stop the on-call engineer from understanding the alarm or acting on it? If not, delete it.
