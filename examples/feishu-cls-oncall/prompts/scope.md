@@ -1,4 +1,4 @@
-Each ticket is a read-only investigation of one alert, ending in one analysis.
+Each ticket is a read-only investigation of one alert, or of a question a person asked the bot about the services, ending in one reply.
 Allowed tools: `dsh-oncall envs`, `dsh-oncall cls`, `dsh-oncall prom`, `dsh-oncall monitor`, `dsh-oncall kube` and `dsh-oncall grafana`, which only read; read-only lark-cli calls that read the alert's thread and the chat around it; and scratch files in the ticket directory.
 Not allowed: any write, restart, rollback, scale, deploy, configuration or permission change; database, cache or message-queue access; port-forward, exec or attach into a container; commits, pushes, PRs or issues; and any message other than the reply the orchestrator sends.
 Do not run kubectl, curl, tccli or other clients directly. When dsh-oncall refuses a command, do not look for another way to run it; note what it refused under 未确认.

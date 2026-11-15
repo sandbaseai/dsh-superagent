@@ -1,13 +1,13 @@
 # 飞书告警只读值班（dsh-superagent 配置包）
 
-这个目录是一套配置：dsh-superagent 不接 GitHub，只接飞书。腾讯云可观测平台的告警（Prometheus 告警、云产品监控告警、CLS 日志告警）发到飞书群后，智能体只读地排查（Prometheus 指标、云监控、CLS 日志、Kubernetes、可选 Grafana），在这条告警的线程里回复一条中文分析。网站兜底页告警（`【… 兜底页告警】`，404、页面错误）也能识别，默认只记录、不排查。它不改任何系统：不重启、不回滚、不发布、不改配置、不提 PR。
+这个目录是一套配置：dsh-superagent 不接 GitHub，只接飞书。腾讯云可观测平台的告警（Prometheus 告警、云产品监控告警、CLS 日志告警）发到飞书群后，智能体只读地排查（Prometheus 指标、云监控、CLS 日志、Kubernetes、可选 Grafana），在这条告警的线程里回复一条中文分析。网站兜底页告警（`【… 兜底页告警】`，404、页面错误）也会排查，并说明是什么问题、需不需要关注。它不改任何系统：不重启、不回滚、不发布、不改配置、不提 PR。
 
 目录内容：
 
 | 文件 | 作用 |
 | --- | --- |
 | `profile.cordis.patch.yml` | DSH profile 补丁：面板端口、`stateDir`、关 GitHub、开飞书、Anthropic 兼容的模型路由 |
-| `settings/*.json` | 四个设置块：`source-feishu`、`policy`（规则 `tencent-alert` 开启、`fallback-page` 关闭）、`eval`、`executor` |
+| `settings/*.json` | 四个设置块：`source-feishu`、`policy`（规则 `tencent-alert`、`fallback-page` 都开启）、`eval`、`executor` |
 | `prompts/*.md` | 团队提示词：沟通（回复格式）、工单范围（只读）、交付要求（无 PR） |
 | `skills/oncall-alerts.md` | 团队技能 `oncall-alerts`（会话里叫 `dsh-superagent-oncall-alerts`）：按告警类型的排查手册。这里是通用示例，部署前换成你自己的告警组、指标和环境映射 |
 | `overrides/*.md` | 覆盖内置的 `runtime/worker`、`runtime/work`、`runtime/admission`，把 PR 和改代码的句子换成只读排查 |
@@ -22,7 +22,7 @@
 3. 告警群设成“全部消息”，告警机器人在策略的 `bots` 名单里，它的消息成为**推断的候选**，交给主 Session 评估。不在名单里的机器人的消息直接过滤掉（原因 `not_human`）。
 4. 飞书 Source 把告警卡片转成纯文本，识别告警类型、状态（已触发、持续触发、已恢复）、告警策略和告警对象。同一策略、同一对象（去掉“当前 6.41 req/s”这类读数；云监控按实例 id 和告警内容）的告警归到同一个**告警线程**：重复触发、持续触发和恢复都落在这个线程上。
 5. 宿主先过滤，不调模型：**恢复通知**直接忽略（原因 `alert_recovered`）；同一告警线程上已有进行中的工单时，**重复告警**直接忽略（`alert_repeat`），并作为输入交给那个工单。
-6. 其余告警交给主 Session 按 `tencent-alert` 规则评估：正在触发的告警才接受；6 小时内同一告警线程上已经接受过（或在 `observe` 模式下“会接受”过）的重复告警、测试消息和兜底页告警都忽略。候选里的 `thread_decisions` 列出这个告警线程最近的判断，`observe` 模式下靠它识别重复。`observe` 模式只记录判断，`auto` 模式才建工单。
+6. 其余告警交给主 Session 按 `tencent-alert` 规则评估：正在触发的告警才接受；6 小时内同一告警线程上已经接受过（或在 `observe` 模式下“会接受”过）的重复告警、测试消息和兜底页告警都忽略（兜底页告警由 `fallback-page` 规则判断）。重复告警不再排查，但宿主会回复它一条短消息：上次的结论和分析所在话题的链接，同一告警 30 分钟内最多一条（`source-feishu` 的 `repeatNoticeMinutes`、`repeatWindowHours`）。候选里的 `thread_decisions` 列出这个告警线程最近的判断，`observe` 模式下靠它识别重复。`observe` 模式只记录判断，`auto` 模式才建工单。
 7. **告警归并**（`auto` 模式）：候选里的 `nearby_tickets` 列出同一 Source 在其他线程上、最近 30 分钟内建的工单。正在触发的告警如果和其中一张指向同一个供应商、模型或上游服务，并且在同一时间触发（比如某供应商的流式首字延迟告警，和由它提供的某个模型的流式首字延迟告警），主 Session 就把它挂到那张工单上，不再新开工单。worker 先核对证据：确实是同一事件，就把它并进同一条回复；回复已经发出时，再补一段最多 3 行的 **补充**；证据显示原因不同，就退回，让主 Session 单独判断。只是同时触发、没有共同的供应商、模型或服务的告警，仍然分开处理。
 7. 接受时静默（不发“收到”），建工单，启动 worker。
 8. worker 用 `dsh-oncall` 只读排查，约 10 分钟，然后报告 ready。
@@ -36,7 +36,7 @@
 | 云产品监控告警（`…的云产品监控告警持续触发`） | 告警策略，如 `MySQL-master-ro`；对象是实例 id，加上告警内容 | 规则 `tencent-alert`；MySQL 用 `dsh-oncall monitor` 读指标 |
 | CLS 告警（卡片里写日志服务，或 CLS 文本通知） | 告警策略和日志主题 | 规则 `tencent-alert` |
 | 任一告警的恢复（`🟩…已恢复` / `恢复`，CLS `通知类型：恢复`） | 状态词 | 宿主直接忽略，不调模型 |
-| 网站兜底页告警（`【… 兜底页告警】`，404 或页面错误） | 类型和页面（去掉查询参数） | **待你决定**：规则 `fallback-page` 默认关闭，`tencent-alert` 会忽略它们，所以只在 **评估** 页留下“忽略”记录。要排查就在面板里开启 `fallback-page`（或改 `settings/policy.json` 后重跑 `oncall-apply`） |
+| 网站兜底页告警（`【… 兜底页告警】`，404 或页面错误） | 类型和页面（去掉查询参数） | 规则 `fallback-page` 开启：同一页面 6 小时内排查一次，回复里说明页面是什么（比如某个 API 的文档页）、访问来自哪里、要不要关注。发兜底页告警的机器人要放进 `--alert-bot` |
 
 ## 安全边界
 
@@ -220,7 +220,7 @@ scripts/oncall-apply --lark-cli "$HOME/.local/bin/lark-bot" --alert-chat <oc_告
 - `--url` 改面板地址（默认 `http://127.0.0.1:3082`）。
 - 顺序是 `source:feishu` → `policy` → `eval` → `executor` → 提示词。机器人 CLI 变了，或服务还在等待设置时，保存会重启 dsh-superagent（回答里 `restarting: true`），脚本会等它重新应答（最多 120 秒）再继续。被拒绝时脚本以非零退出，并打印服务端的 `error` 和 `setup` 信息。
 
-想让值班同学在线程里 @ 机器人追问，可以在面板设置 **策略** 的飞书名单里加他们的 open_id；他们的请求同样受只读提示词约束。注意重跑 `oncall-apply` 会用 `settings/policy.json` 覆盖整个策略块，名单会被清空：要保留就先把他们写进那个文件的 `allowed`。
+想让值班同学 @ 机器人提问，可以在 `settings/policy.json` 的飞书名单里加他们的 open_id，或者把 `syncChat` 设成告警群的 chat id，名单就跟着群成员走。名单里的人 @ 机器人是明确的请求：主 Session 接受后，worker 用同样的只读工具查，再在提问的话题里回答。注意重跑 `oncall-apply` 会用 `settings/policy.json` 覆盖整个策略块，名单会被清空：要保留就先把他们写进那个文件的 `allowed`。
 
 ## 启停与状态
 
@@ -265,7 +265,7 @@ cd <checkout> && { scripts/dsh-superagent --profile superagent status >/dev/null
 | 告警发了，面板上什么都没有 | 历史补收每分钟一轮，第一轮只记位置；等 1–2 分钟。确认群设成“全部消息”、机器人有 `im:message.group_msg` 权限、在群里 |
 | 面板 **评估** 页的判断原因是 `not_human` | 告警机器人的 sender id 不在 `bots` 名单里，或 id 不对；按上面的方法重新读 |
 | 判断原因是 `alert_recovered` 或 `alert_repeat` | 正常：恢复通知，或同一告警线程上已有进行中的工单 |
-| 兜底页告警都被忽略 | 正常：规则 `fallback-page` 默认关闭 |
+| 兜底页告警都被忽略 | 发兜底页告警的机器人不在 `--alert-bot` 里，或者规则 `fallback-page` 被关掉了 |
 | 判断是“会接受”但没建工单 | 还在 `observe` 模式；确认后用 `--mode auto` 重跑 `oncall-apply` |
 | `modelUnavailable` | 模型路由没加载、模型 id 不在路由里或 Key 缺失：检查 profile 补丁（`anthropic-gateway` 和两个模型 id）和 `.credentials.yaml`，重启服务 |
 | 请求失败 `MISSING_CREDENTIAL` | DSH 找不到 `ONCALL_LLM_API_KEY`；写进 `$DSH_HOME/.credentials.yaml` |

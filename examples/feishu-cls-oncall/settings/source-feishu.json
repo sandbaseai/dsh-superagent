@@ -2,8 +2,15 @@
   "enabled": true,
   "config": {
     "cli": "<lark-bot>",
-    "chats": [{ "chatId": "<oc_alert_chat>", "listen": "all" }],
+    "chats": [
+      {
+        "chatId": "<oc_alert_chat>",
+        "listen": "all"
+      }
+    ],
     "directMessages": false,
-    "otherChats": "none"
+    "otherChats": "none",
+    "repeatNoticeMinutes": 30,
+    "repeatWindowHours": 6
   }
 }

@@ -13,6 +13,7 @@ import { feishuRef, feishuTime, feishuTrigger, HistoricalMessageSchema, historyE
   from './feishu-trigger.ts'
 import { health, type SourceContext } from './host.ts'
 import { KV } from '../kv.ts'
+import { repeatNotice } from './feishu-repeat.ts'
 import { POLL_HORIZON_MS, polled, pollThreads as pollEach } from './poll.ts'
 /**
  * How far each history round reaches back before the previous round's start. Feishu's history API can list a message some
@@ -31,8 +32,11 @@ const bot = (ctx: SourceContext): FeishuBot => {
   if (!resolved) throw new Error('The Feishu Source has no working bot CLI')
   return resolved
 }
-async function receive(ctx: SourceContext, trigger: Trigger): Promise<void> {
-  await ctx.receive(trigger)
+async function receive(ctx: SourceContext, trigger: Trigger, signal?: AbortSignal): Promise<void> {
+  const result = await ctx.receive(trigger)
+  const config = enabled(ctx)
+  // Only a newly stored alarm is answered; a message read again by an overlapping history round is not.
+  if (result === 'stored' && config) await repeatNotice(ctx, trigger, config, signal)
   const chatId = String(trigger.meta.chatId ?? '')
   if (!chatId) return
   const name = ctx.state.get(KV.sources.labels(SOURCE))?.[chatId] ?? chatId
@@ -197,7 +201,7 @@ export async function backfillChat(ctx: SourceContext, chatId: string, direct: b
         const at = feishuTime(message.create_time)
         if (message.thread_id && !(Date.parse(topics[message.thread_id] ?? '') >= Date.parse(at))) topics[message.thread_id] = at
         const trigger = feishuTrigger(historyEvent(message, chatId, direct), bot(ctx).botId, bot(ctx).appId)
-        if (trigger) await receive(ctx, trigger)
+        if (trigger) await receive(ctx, trigger, signal)
       }
       const stuck = result.has_more && (!result.page_token || pages.has(result.page_token))
       if (stuck) throw new Error('Feishu history pagination did not advance')

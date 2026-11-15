@@ -899,7 +899,8 @@ describe('the Feishu on-call kit', () => {
     const accepted = await runTool(next.masterId, 'orchestrator_eval_decide', { trigger_id: trigger.id, decision: 'accept',
       title: 'app-apiserver 5xx 过多', worktree_name: 'apiserver-5xx', scope: 'Read-only investigation of the alarm', reason: 'A firing CLS alarm from the listed alarm bot',
       intent_evidence: '告警策略：app-apiserver 5xx 过多; 通知类型：告警; no open ticket for this policy',
-      rule_assessments: [{ rule_id: 'tencent-alert', matched: true, reason: 'A firing CLS alarm in the alert chat' }],
+      rule_assessments: [{ rule_id: 'tencent-alert', matched: true, reason: 'A firing CLS alarm in the alert chat' },
+        { rule_id: 'fallback-page', matched: false, reason: 'Not a fallback page' }],
       direction: { implementation_requested: true, target_basis: 'existing-standard', requires_design_decision: false, evidence: '$1.c > 50 against the normal 5xx rate' } })
     const ticket = next.store.tickets.get((accepted.ticket as { ticket_id: string }).ticket_id)!
     expect(ticket.mandate).toMatchObject({ strength: 'inferred', basis: expect.objectContaining({ via: 'bot', sender: '腾讯云告警', rules: ['tencent-alert'], observation: { mode: 'auto' } }) })
@@ -939,7 +940,8 @@ describe('the Feishu on-call kit', () => {
     worktree_name: 'provider-qps-spike', scope: 'Read-only investigation of the alarm', reason: decision === 'accept'
       ? 'A firing Prometheus alarm from the listed alarm bot' : 'Repeat of an alarm accepted within 6 hours',
     ...decision === 'accept' ? { intent_evidence: '告警策略: example_alerts_p2/ProviderQPSSpike; 已触发; no earlier decision on this alert Thread' } : {},
-    rule_assessments: [{ rule_id: 'tencent-alert', matched: decision === 'accept', reason: decision === 'accept' ? 'A firing Prometheus alarm' : 'A repeat' }],
+    rule_assessments: [{ rule_id: 'tencent-alert', matched: decision === 'accept', reason: decision === 'accept' ? 'A firing Prometheus alarm' : 'A repeat' },
+      { rule_id: 'fallback-page', matched: false, reason: 'Not a fallback page' }],
     direction: { implementation_requested: true, target_basis: 'existing-standard', requires_design_decision: false, evidence: 'QPS more than 3x the rate 15 minutes before' } })
   const candidates = (next: Runtime) => relays(next.masterId).filter(relay => relay.kind === 'candidate')
   it('accepts a firing Prometheus alert card once, groups its still-firing repeat into the ticket, and replies in the first alert\'s thread', async () => {
@@ -998,13 +1000,13 @@ describe('the Feishu on-call kit', () => {
       .toMatchObject({ kind: 'ignore', reason: [expect.objectContaining({ code: 'alert_recovered' })] })
     expect(vi.mocked(Commands.prototype.lark).mock.calls.map(([args]) => args).filter(args => ['+messages-reply', '+messages-send'].includes(String(args[1])))).toEqual([])
   })
-  it('makes a fallback-page alert an inferred candidate, which the kit\'s enabled rule ignores while fallback-page is off', async () => {
+  it('makes a fallback-page alert an inferred candidate for the kit\'s enabled fallback-page rule', async () => {
     const next = await alertDeployment()
     const trigger = alertTrigger(fallback404)
     expect(trigger.meta.alert).toMatchObject({ kind: 'fallback-page', status: 'firing' })
     await receive(trigger, next)
     expect(candidates(next)).toEqual([expect.objectContaining({ trigger_id: trigger.id, strength: 'inferred' })])
-    expect(kitPolicy().rules.map(rule => [rule.id, (rule as { enabled?: boolean }).enabled])).toEqual([['tencent-alert', true], ['fallback-page', false]])
+    expect(kitPolicy().rules.map(rule => [rule.id, (rule as { enabled?: boolean }).enabled])).toEqual([['tencent-alert', true], ['fallback-page', true]])
   })
 })
 it('reports each setup problem where the operator fixes it, and checks the agent CLI the way worker shells run it', async () => {

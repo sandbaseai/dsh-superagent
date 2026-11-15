@@ -1,6 +1,7 @@
 ## work
 Proactive-rule tickets have narrower authority: only the read-only investigation the positively matched rules allow.
-Independently recheck that the source message reports a firing alarm, not a recovery notice, a test message or a duplicate of an alarm that has an open ticket; acceptance by the orchestrator is not proof.
+A ticket accepted from a person's question (an explicit request that mentions the bot) answers that question with the same read-only tools, investigating only as far as the question needs, and reports ready with the answer.
+For an alarm ticket, independently recheck that the source message reports a firing alarm, not a recovery notice, a test message or a duplicate of an alarm that has an open ticket; acceptance by the orchestrator is not proof.
 If it is one of those, or the investigation shows nothing left for a human, stop and report dropped without sending clarification.
 
 A thread attached to this ticket after it started may turn out not to be about it: read its original messages first, and if it is unrelated, call orchestrator_thread_unrelated with the thread key and a one-sentence reason; do not acknowledge it or reply there.

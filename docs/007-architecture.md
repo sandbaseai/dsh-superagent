@@ -370,6 +370,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/feishu.ts` | The Feishu kind and plugin entry, exported as `./feishu-watch` |
 | `src/sources/feishu-trigger.ts` | Feishu messages as Triggers, by one rule for live events, history pages and topic pages |
 | `src/sources/feishu-alert.ts` | Alert notices of monitoring bots (Tencent Cloud Observability cards, CLS text, a site's fallback page) parsed into a kind, status, policy and object, and the alert Thread that groups one policy and object |
+| `src/sources/feishu-repeat.ts` | Repeat notices: a firing alarm that a completed ticket on its alert Thread analysed within `repeatWindowHours` gets a reply with that conclusion and a link to the analysis, at most once per `repeatNoticeMinutes` on the Thread |
 | `src/sources/feishu-loops.ts` | The Feishu loops: the event consumer, history recovery, chat names and polling of subscribed topics |
 | `src/sources/feishu-channel.ts` | The Feishu Channel: topic replies, `sent` or `gone` |
 | `src/sources/feishu-read.ts` | The `feishu/` reads of a Trigger's message, its root, parent and topic, and `feishuThreadContext`, which gives them to assessments with their images |
