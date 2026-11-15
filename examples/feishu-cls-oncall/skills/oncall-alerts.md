@@ -58,7 +58,7 @@ Rerun the alert's own condition first to confirm the numbers, then the error cou
 
 ## 4. Prometheus and Grafana reads
 
-`dsh-oncall prom` reads the Prometheus HTTP API: `query --query Q [--time T]`, `range --query Q --from --to --step` (at most 24 h; the step is raised to keep about 1100 points), `series --match M`, `labels`, `label-values --label NAME` (windows at most 6 h), `rules`, `alerts`. When the environment lists `grafana`, `dsh-oncall grafana --env <env> /api/search --param query=<name>` finds a dashboard such as the one the alert links.
+`dsh-oncall prom` reads the Prometheus HTTP API: `query --query Q [--time T]`, `range --query Q --from --to --step` (at most 7 days; the step is raised to keep about 1100 points, so a 7-day window has steps of 550 s or more), `series --match M`, `labels`, `label-values --label NAME` (windows at most 6 h), `rules`, `alerts`. When the environment lists `grafana`, `dsh-oncall grafana --env <env> /api/search --param query=<name>` finds a dashboard such as the one the alert links.
 
 ## 5. Read Kubernetes
 
@@ -77,5 +77,7 @@ dsh-oncall kube --env <env> top pods
 Look for restarts and their reasons (OOMKilled, CrashLoopBackOff, failed probes), a rollout or a new ReplicaSet near the start, pending pods, node pressure and image or configuration errors in events. Secrets and ConfigMap contents are not readable; do not try.
 
 ## 6. Conclude and report
+
+Keep the investigation proportionate: most alarms are settled within about 40 dsh-oncall calls. Ask one question per query: group by a label (`sum by (provider, status) (...)`) instead of one query per provider, and read a baseline with one 7-day `range` at a coarse step instead of several 24 h windows. Stop once two independent signals agree on a cause, such as a metric and the matching log lines, and write the conclusion. When about 15 queries in a row add nothing, stop too: conclude with what was found, 低 confidence and the open question in **未确认**, rather than querying on.
 
 Tie each conclusion to evidence: a QPS drop of provider A at 22:04 followed by the spike on provider B at 22:06 is evidence of a fallback shift; a deploy on the same day is not. Prefer one well-supported cause with 中 confidence over several guesses. Report ready with the reply in the Communication section's format (**结论**, **证据**, **影响**, **建议**, **未确认**) first, then the full evidence: each command or query exactly as run, its time range and its key numbers. Mask IPs as the Communication section says, and quote no hostnames, account ids or secrets beyond what the alert itself shows.

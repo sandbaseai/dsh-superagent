@@ -448,6 +448,8 @@ PROM_COMMANDS = {'query': 'query', 'range': 'query_range', 'series': 'series', '
                  'rules': 'rules', 'alerts': 'alerts'}
 LABEL = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
 MAX_QUERY = 4000
+# How far back `prom range` reaches, so a worker can compare an alarm with the same hours of earlier days.
+RANGE_DAYS = 7
 
 
 def check_base(url, key, allow_path):
@@ -491,7 +493,8 @@ def prom_window(options, limit_seconds, now_ms):
     if start >= end:
         raise Refused('refused: --from must be before --to')
     if end - start > limit_seconds * 1000:
-        raise Refused('refused: the window --from..--to is at most ' + str(limit_seconds // 3600) + ' h for this command')
+        span = str(limit_seconds // 86400) + ' days' if limit_seconds % 86400 == 0 and limit_seconds > 86400 else str(limit_seconds // 3600) + ' h'
+        raise Refused('refused: the window --from..--to is at most ' + span + ' for this command')
     return start, end
 
 
@@ -513,7 +516,8 @@ def command_prom(sub, options):
         params = [('query', options.query), ('time', prom_seconds(parse_time(options.time, now_ms)))]
     elif sub == 'range':
         check_query(options.query, '--query')
-        start, end = prom_window(options, 86400, now_ms)
+        # A longer window only raises the step: a range answer keeps about 1100 points per series either way.
+        start, end = prom_window(options, RANGE_DAYS * 86400, now_ms)
         if options.step < 1:
             raise Refused('refused: --step must be a positive number of seconds')
         step = max(options.step, 15, math.ceil((end - start) / 1000 / 1100))
@@ -782,8 +786,8 @@ USAGE = """usage:
   dsh-oncall prom --env E label-values --label NAME [--match M ...] [--from -1h] [--to now]
   dsh-oncall prom --env E rules|alerts
   dsh-oncall grafana --env E <path> [--param key=value ...]
-Times: now, -15m/-2h/-1d, epoch milliseconds or ISO-8601. prom range is at most 24 h (step raised to at least
-max(15, range/1100) seconds); series, labels and label-values windows at most 6 h. monitor GetMonitorData takes
+Times: now, -15m/-2h/-1d, epoch milliseconds or ISO-8601. prom range is at most 7 days (step raised to at least
+max(15, range/1100) seconds, so 7 days gives 550 s or more); series, labels and label-values windows at most 6 h. monitor GetMonitorData takes
 StartTime/EndTime as ISO-8601 at most 24 h apart and Period >= 60; DescribeAlarmHistories takes StartTime/EndTime in
 epoch seconds at most 7 days apart and PageSize <= 100.
 """
