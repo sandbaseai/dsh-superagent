@@ -242,6 +242,28 @@ scripts/dsh-superagent stop      # 等 worker 结束，最多 5 分钟；不强�
 
 日志在仓库的 `.artifacts/dsh-superagent-superagent-*.log`。面板地址在日志里，打开后选侧栏的 **Superagent**。
 
+## 渠道日报
+
+`scripts/oncall-digest` 每天往告警群发一份渠道日报，内容包括：
+- 每个供应商过去 24 小时的流量、成功率、流式首字 P95，和 7 天前同一时段对比。
+- 按固定阈值列出的明显变化，排序是成功率下降在前，然后是变慢，最后是流量转移。
+- 每个环境一张波动图。
+
+它不调模型，只通过 `dsh-oncall prom` 只读地查 Prometheus，再用机器人身份的 lark-cli 发消息。看到可疑的项，在群里 @ 机器人细查。
+
+配置写在一个 JSON 里，示例见 `digest.json`：发到哪个群（`chat`），查哪些环境（`envs`），指标名（`metrics`），阈值（`thresholds`，有默认值）。画图要用 matplotlib 和中文字体。在服务器上装一次：
+
+```bash
+sudo apt-get install -y python3.12-venv fonts-noto-cjk
+python3 -m venv ~/.venvs/digest && ~/.venvs/digest/bin/pip install matplotlib
+```
+
+先 `--dry-run` 看文字和图，再用 `--chat <测试群>` 发一次试试，最后用 cron 定时：
+
+```bash
+7 9 * * * cd $HOME && PATH=$HOME/.local/bin:$PATH $HOME/.venvs/digest/bin/python $HOME/dsh-superagent/scripts/oncall-digest --config $HOME/kit-local/digest.json >> $HOME/digest.log 2>&1
+```
+
 ## 每小时健康检查
 
 在你平时用的**另一个** DSH profile 里（服务挂了它也要能跑），让智能体按这个提示词建一个每小时的定时任务，填上仓库路径：
