@@ -294,6 +294,14 @@ it('assesses a proactive observation in the orchestrator Session and creates the
   expect(ticket.mandate).toMatchObject({ strength: 'inferred', basis: expect.objectContaining({ via: 'admission', rules: ['copy'], observation: { mode: 'auto' } }) })
   expect(runtime.store.replyStatus(key('ack', again.id))).toBeDefined()
   expect(await runTool(`worker-${ticket.id}`, 'orchestrator_read', { resource: `ticket/${ticket.id}/assignment` })).toMatchObject({ text: expect.stringContaining('Proactively accepted under copy') })
+  // A candidate on another thread sees that ticket as a nearby one, and may be attached to it as the same work.
+  const related = feishu('6', '标题也一起改成“浏览网页”', { mentions: [] })
+  await receive(related)
+  const nearby = await runTool(runtime.masterId, 'orchestrator_eval', { trigger_id: related.id })
+  expect(nearby).toMatchObject({ nearby_tickets: [{ ticket_id: ticket.id, title: '文案修订', created_at: ticket.createdAt }] })
+  expect(await runTool(runtime.masterId, 'orchestrator_route', { decisions: [{ kind: 'attach', trigger_id: related.id, ticket_id: ticket.id, note: '同一处文案' }] }))
+    .toMatchObject({ results: [{ kind: 'attach', trigger_id: related.id, ticket: { ticket_id: ticket.id } }] })
+  expect(runtime.store.tickets.get(ticket.id)!.inputs).toContainEqual(expect.objectContaining({ kind: 'trigger', triggerId: related.id }))
 })
 
 it('accepts silently under a rule that says so, gives the worker the rule procedure, and closes it as dropped when nothing is left for a human', async () => {

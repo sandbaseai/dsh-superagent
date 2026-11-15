@@ -1,5 +1,6 @@
 Return to the alert's own Feishu thread to deliver: one reply, in Chinese, once the investigation is ready.
 Send no acknowledgement, progress update or second message; a person reads the reply, not a work log.
+An alarm attached to this ticket as the same incident gets no reply of its own: fold it into the reply, or, when the reply was already sent, report ready again with a short **补充** of at most three lines saying which alarm joined and what it changes in the conclusion, or that it changes nothing.
 Keep the reply to about 15 lines, in this order, each part a bold label followed by short lines:
 - **结论**: the most likely root cause in one or two sentences, with a confidence of 高, 中 or 低.
 - **证据**: two to five bullets; each names the exact query or command, such as `dsh-oncall cls --env <env> --query '<query>' --from <start> --to <end>`, and the key numbers or log lines it returned, with timestamps in Asia/Shanghai time.

@@ -152,6 +152,24 @@ describe('eval', () => {
     expect(decision.kind).toBe('unavailable')
     expect(h.repo.tickets.list()).toEqual([])
   })
+  it('shows a candidate the tickets of other threads of its Source from the last half hour, newest first', () => {
+    const h = harness()
+    const first = accepted(h, '1', 'A').ticketId!
+    h.tick(60)
+    const second = accepted(h, '2', 'B').ticketId!
+    h.tick(60)
+    const stopped = accepted(h, '3', 'C').ticketId!
+    h.engine.stopTicket(stopped)
+    // Another Source's ticket is not a nearby one.
+    h.engine.receive(trigger('4', { source: 'gh', threads: [{ source: 'gh', id: 'pr-1' }] })); h.pump()
+    h.decide(h.requests.at(-1)!, { kind: 'accept', title: 'PR', scope: 'small', reason: 'requested', acknowledgement: 'ok' }); h.settle()
+    h.engine.receive(trigger('5', { threads: [{ source: 'chat', id: 'D' }] })); h.pump()
+    expect(h.requests.at(-1)!.nearby?.map(ticket => ticket.id)).toEqual([second, first])
+    h.decide(h.requests.at(-1)!, { kind: 'ignore', reason: 'chatter' })
+    h.tick(30 * 60)
+    h.engine.receive(trigger('7', { threads: [{ source: 'chat', id: 'E' }] })); h.pump()
+    expect(h.requests.at(-1)!).not.toHaveProperty('nearby')
+  })
   it('starts every pending eval in one step, so a second pump starts none of them again', () => {
     const h = harness()
     for (const [id, thread] of [['1', 'A'], ['2', 'B']] as const) h.engine.receive(trigger(id, { threads: [{ source: 'chat', id: thread }] }))
