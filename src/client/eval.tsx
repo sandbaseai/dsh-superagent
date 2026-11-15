@@ -192,8 +192,9 @@ function PolicyBlock() {
 function EvalBlock() {
   const { t } = usePanel()
   const block = useSettings().settings.blocks.eval
-  const saved = { ...block.value, timeoutSeconds: String(block.value.timeoutSeconds) }
-  const draft = useBlockDraft('eval', saved, block.revision, value => ({ ...value, timeoutSeconds: numberOf(value.timeoutSeconds) }))
+  const saved = { ...block.value, timeoutSeconds: String(block.value.timeoutSeconds), nearbyMinutes: String(block.value.nearbyMinutes) }
+  const draft = useBlockDraft('eval', saved, block.revision, value => ({ ...value, timeoutSeconds: numberOf(value.timeoutSeconds),
+    nearbyMinutes: numberOf(value.nearbyMinutes) }))
   const value = draft.value
   const edit = (next: Partial<typeof value>) => draft.edit({ ...value, ...next })
   return <form className="dt-form dt-block" onSubmit={event => { void draft.submit(event) }}>
@@ -207,6 +208,10 @@ function EvalBlock() {
       <Field label={t('evalTimeout')} hint={t('evalTimeoutHint')}>
         <Input type="number" min={LIMITS.evalTimeoutSeconds.min} max={LIMITS.evalTimeoutSeconds.max} required value={value.timeoutSeconds}
           onChange={event => edit({ timeoutSeconds: event.target.value })} />
+      </Field>
+      <Field label={t('nearbyMinutes')} hint={t('nearbyMinutesHint')}>
+        <Input type="number" min={LIMITS.nearbyMinutes.min} max={LIMITS.nearbyMinutes.max} required value={value.nearbyMinutes}
+          onChange={event => edit({ nearbyMinutes: event.target.value })} />
       </Field>
       <Section title={t('assessorModel')} hint={t('assessorModelHint')}>
         <ModelField id="dt-eval-model" value={value.model} onChange={model => edit({ model })} />

@@ -21,7 +21,7 @@ const REQUEUES = 2
 const RECENT_DECISIONS = 5
 /** How far back a candidate keeps the newest accept or would-accept on its Thread beyond the latest Decisions. */
 export const ACCEPT_RECALL_MS = 6 * 3600_000
-/** How far back a candidate's nearby Tickets on other Threads reach, and how many it carries. */
+/** How far back a candidate's nearby Tickets on other Threads reach when the Policy does not say, and how many it carries. */
 export const NEARBY_MS = 30 * 60_000
 const NEARBY_TICKETS = 5
 /**
@@ -263,7 +263,7 @@ export class Evals extends EnginePart {
   }
   /** See `Candidate.nearby`. */
   private nearby(thread: Thread) {
-    const since = Date.parse(this.now()) - NEARBY_MS
+    const since = Date.parse(this.now()) - (this.policy().nearbyMs ?? NEARBY_MS)
     return this.repo.tickets.list()
       .filter(ticket => Date.parse(ticket.createdAt) >= since && ticket.ended?.by !== 'human' && !thread.subscriptions.includes(ticket.id)
         && this.source(ticket)?.source === thread.ref.source)
