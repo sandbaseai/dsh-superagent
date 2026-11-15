@@ -318,6 +318,14 @@ it('queries Prometheus through the Grafana datasource proxy with the bearer toke
   expect(new URL(requests[1]!.url!, 'http://h').pathname).toBe('/api/datasources/proxy/uid/prom_1/api/v1/label/provider/values')
   expect(result.stdout + result.stderr).not.toContain(GRAFANA_TOKEN)
 })
+it('reaches back seven days for a range query by raising the step, and refuses a longer window', async () => {
+  config('prod', [`PROM_URL=${await serve(matrix)}`, `PROM_TOKEN=${PROM_TOKEN}`])
+  const week = await run(['prom', '--env', 'prod', 'range', '--query', 'up', '--from', '-7d', '--step', '60'])
+  expect(week.code, week.stderr).toBe(0)
+  expect(JSON.parse(week.stdout).step).toBe(550)
+  const longer = await run(['prom', '--env', 'prod', 'range', '--query', 'up', '--from', '-8d'])
+  expect(longer).toMatchObject({ code: 2, stderr: expect.stringContaining('at most 7 days') })
+})
 it('cuts series, then points, of a large matrix to fit the output limit', async () => {
   const series = (n: number, points: number) => Array.from({ length: n }, (_, index) => ({ metric: { provider: `p${index}` },
     values: Array.from({ length: points }, (_, t) => [1762800000 + t * 60, '12345.678']) }))
@@ -329,7 +337,7 @@ it('cuts series, then points, of a large matrix to fit the output limit', async 
   expect(output.result[0].values).toHaveLength(1440)
 })
 it.each([
-  ['range', '--query', 'up', '--from', '-2d'], ['series', '--match', 'up', '--from', '-7h'], ['series'], ['query'],
+  ['range', '--query', 'up', '--from', '-8d'], ['series', '--match', 'up', '--from', '-7h'], ['series'], ['query'],
   ['query', '--query', 'x'.repeat(4001)], ['label-values', '--label', 'bad-name'], ['label-values', '--label', '../x'],
   ['rules', '--query', 'up'], ['delete'], ['range', '--query', 'up', '--from', 'now', '--to', '-1h'],
 ])('refuses prom %s before any request', async (...args: string[]) => {
