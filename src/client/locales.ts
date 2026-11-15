@@ -229,6 +229,8 @@ const TEXT = {
   duplicate: ['复制', 'Duplicate'],
   copySuffix: [' 副本', ' copy'],
   evalTimeout: ['单次评估时限 / 秒', 'Eval time limit / seconds'],
+  nearbyMinutes: ['附近工单的时间范围 / 分钟', 'Nearby tickets window / minutes'],
+  nearbyMinutesHint: ['评估时列出同一来源其他线程上这段时间内建的工单，规则可以把同一事件的消息挂到其中一张上。', 'An Eval lists the tickets of the same Source on other Threads created in this window; a rule may attach a message about the same incident to one of them.'],
   evalTimeoutHint: ['主 Session 读取上下文并研判。到期后记为未完成，后续触发重新评估。', 'The main Session reads context and assesses. When time runs out the Eval is unavailable and later Triggers are evaluated again.'],
   evalIntro: ['评估决定一批触发是否成为工作：推断出的候选能否接单、评估时限和研判模型。', 'Eval decides whether a batch of Triggers becomes work: whether inferred candidates may be accepted, the time limit, and the assessor model.'],
   evalSettings: ['评估设置', 'Eval settings'],

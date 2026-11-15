@@ -170,6 +170,13 @@ describe('eval', () => {
     h.engine.receive(trigger('7', { threads: [{ source: 'chat', id: 'E' }] })); h.pump()
     expect(h.requests.at(-1)!).not.toHaveProperty('nearby')
   })
+  it('reaches back as far as the Policy\'s nearby window', () => {
+    const h = harness({ nearbyMs: 6 * 3600_000 })
+    const first = accepted(h, '1', 'A').ticketId!
+    h.tick(5 * 3600)
+    h.engine.receive(trigger('2', { threads: [{ source: 'chat', id: 'B' }] })); h.pump()
+    expect(h.requests.at(-1)!.nearby?.map(ticket => ticket.id)).toEqual([first])
+  })
   it('starts every pending eval in one step, so a second pump starts none of them again', () => {
     const h = harness()
     for (const [id, thread] of [['1', 'A'], ['2', 'B']] as const) h.engine.receive(trigger(id, { threads: [{ source: 'chat', id: thread }] }))

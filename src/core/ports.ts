@@ -24,6 +24,8 @@ export interface Policy {
   admitsInferred(rules: readonly string[]): boolean
   /** How long an assessor may take before an eval is recorded as unavailable. */
   evalTimeoutMs: number
+  /** How far back a candidate's nearby tickets reach; `NEARBY_MS` when unset. */
+  nearbyMs?: number
 }
 
 /** What the assessor receives: bounded facts, never authority. */
@@ -38,7 +40,7 @@ export interface Candidate {
   /** The latest Decisions on the thread, oldest first, at most five, for repeat judgement. */
   decisions?: Decision[]
   /**
-   * Tickets of the same Source on other Threads created within `NEARBY_MS`, newest first, at most five, leaving out those a
+   * Tickets of the same Source on other Threads created within the Policy's `nearbyMs`, newest first, at most five, leaving out those a
    * person stopped: candidates for attaching a Trigger that reports the same incident, such as alerts that fire together.
    */
   nearby?: Ticket[]

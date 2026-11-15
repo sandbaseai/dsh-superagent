@@ -83,6 +83,8 @@ export const PolicyConfigSchema = z.object({
 export const EvalConfigSchema = z.object({
   mode: z.enum(['off', 'observe', 'auto']).default('observe'),
   timeoutSeconds: z.number().int().min(LIMITS.evalTimeoutSeconds.min).max(LIMITS.evalTimeoutSeconds.max).default(120),
+  /** How far back a candidate's nearby tickets on other Threads reach. */
+  nearbyMinutes: z.number().int().min(LIMITS.nearbyMinutes.min).max(LIMITS.nearbyMinutes.max).default(30),
   model: RoleModelSchema.nullable().default(null),
 }).strict()
 const CommandNameSchema = z.string().regex(/^[A-Za-z0-9._-]+$/).refine(name => name !== '.' && name !== '..', 'Not a command name')
@@ -193,7 +195,7 @@ export function settingsPolicy(settings: Settings, sources: SourceScope): Policy
     return { admissible: true, strength: 'inferred', basis: { ...recorded, via: 'admission', cell, observation: { mode } } }
   }
   return {
-    version, paused: settings.paused, evalTimeoutMs: settings.eval.timeoutSeconds * 1000,
+    version, paused: settings.paused, evalTimeoutMs: settings.eval.timeoutSeconds * 1000, nearbyMs: settings.eval.nearbyMinutes * 60_000,
     gate(trigger: Trigger, thread, tickets) {
       if (!trigger.human) return machineGate(trigger, tickets)
       const allowed = allowedSender(settings, trigger.actor)

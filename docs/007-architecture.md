@@ -548,7 +548,7 @@ Settings and prompt saves return the saved configuration. Policy sync returns th
 
 - The Trigger text, up to 4,000 characters, with image ids and other Triggers in the batch.
 - Up to eight `related_tickets`, open ones first, and `tickets_total`.
-- `nearby_tickets`, when there are any: Tickets of the same Source on other Threads created within the last 30 minutes (`NEARBY_MS`), newest first, at most five, leaving out those a person stopped, each with `created_at`. They change nothing unless an enabled rule says a Trigger reporting the same incident joins one of them; the main Session then attaches it there with `orchestrator_route` kind `attach`. The Feishu on-call kit uses this to group alarms that fire together.
+- `nearby_tickets`, when there are any: Tickets of the same Source on other Threads created within the eval setting `nearbyMinutes` (default 30), newest first, at most five, leaving out those a person stopped, each with `created_at`. They change nothing unless an enabled rule says a Trigger reporting the same incident joins one of them; the main Session then attaches it there with `orchestrator_route` kind `attach`. The Feishu on-call kit uses this to group alarms that fire together.
 - `thread_decisions`, when the Thread has Decisions: its latest five, oldest first, as `{at, kind, reason}`, with `would_accept` and the proposed `title` for an observe-mode acceptance, so repeats can be recognized without a Ticket.
 - The Eval's `policy_version`.
 - A Thread window: the first five messages and five on either side of the Trigger. Messages use `{id, from, at, text}`, normally limited to 400 characters, or 1,200 for the two on either side. Truncated messages include `chars`; image references use `images`.
