@@ -99,6 +99,12 @@ def main():
     backups = args.backup_dir or args.state_dir.parent / 'backups'
 
     try:
+        # The build needs pnpm and the restart (and its rollback) needs dsh and tmux; finding one missing only after the
+        # service stopped would leave it down. A non-login ssh shell often lacks ~/.local/bin.
+        missing = [name for name in ('pnpm', 'dsh', 'tmux') if not shutil.which(name)]
+        if missing:
+            raise Refused(f'{", ".join(missing)} not found on PATH ({os.environ.get("PATH", "")}); '
+                          'run from a login shell or add their directory to PATH')
         if git('status', '--porcelain', '--untracked-files=no'):
             raise Refused('the checkout has uncommitted changes; commit or discard them first')
         git('fetch', '--quiet', 'origin')
