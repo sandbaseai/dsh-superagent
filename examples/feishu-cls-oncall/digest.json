@@ -1,0 +1,17 @@
+{
+  "chat": "oc_alertchat0001",
+  "envs": [
+    { "env": "prod-a", "label": "Region A prod-a" },
+    { "env": "prod-b", "label": "Region B prod-b" }
+  ],
+  "metrics": {
+    "requests": "example_provider_request_total",
+    "provider": "provider",
+    "status": "status",
+    "failed": "failed",
+    "ttft": "example_provider_ttft_seconds_bucket",
+    "ttftSelector": "{stream=\"true\"}"
+  },
+  "top": 8,
+  "minRequests": 500
+}

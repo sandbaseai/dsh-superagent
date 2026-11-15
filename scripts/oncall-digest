@@ -1,0 +1,296 @@
+#!/usr/bin/env python3
+"""Post a channel digest to a Feishu chat: each provider's traffic, success rate and stream TTFT over the last 24 h, compared
+with the same 24 h a week earlier, with charts and a list of notable changes.
+
+It reads Prometheus only through `dsh-oncall prom` (read-only, credentials stay in dsh-oncall's environment files) and posts
+with a bot-only lark-cli. It calls no model: the changes it lists come from fixed thresholds in the config, so a person can
+@ the bot to dig into one.
+
+  oncall-digest --config digest.json [--dry-run] [--out DIR] [--no-charts]
+
+Exit 0 posted (or printed with --dry-run), 1 a query or the post failed, 2 a bad config or argument.
+"""
+
+import argparse
+import datetime
+import json
+import math
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+
+DAY = 86400
+STEP = 1800
+# Each chart point covers this window, so a provider with a few requests an hour does not swing between 0 and 100%.
+WINDOW = '1h'
+# A success-rate point with fewer requests in its window is left out.
+MIN_POINT_REQUESTS = 30
+# Lines per chart: the busiest providers only, so the colours stay readable.
+CHART_LINES = 5
+CHART_FONT = '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc'
+DEFAULTS = {'top': 8, 'minRequests': 500, 'lookbackDays': 7, 'timeZone': 'Asia/Shanghai',
+            'thresholds': {'shareDelta': 0.10, 'volumeChange': 0.5, 'successDrop': 0.05, 'ttftRatio': 1.5, 'minShare': 0.02,
+                           'stableTotal': 0.3, 'maxLines': 6}}
+NAME = re.compile(r'^[A-Za-z_:][A-Za-z0-9_:]*$')
+
+
+class Invalid(Exception):
+    """A bad config or argument."""
+
+
+def load_config(path):
+    try:
+        config = json.loads(Path(path).read_text())
+    except (OSError, ValueError) as error:
+        raise Invalid(f'cannot read {path}: {error}') from None
+    merged = {**DEFAULTS, **config, 'thresholds': {**DEFAULTS['thresholds'], **config.get('thresholds', {})}}
+    if not re.fullmatch(r'oc_[A-Za-z0-9]+', str(merged.get('chat', ''))):
+        raise Invalid('chat must be a Feishu chat id (oc_...)')
+    envs = merged.get('envs')
+    if not isinstance(envs, list) or not envs or not all(isinstance(e, dict) and re.fullmatch(r'[a-z0-9-]+', str(e.get('env', ''))) for e in envs):
+        raise Invalid('envs must list objects with an env name such as prod-a')
+    metrics = merged.get('metrics', {})
+    for field in ('requests', 'provider', 'status'):
+        if not NAME.match(str(metrics.get(field, ''))):
+            raise Invalid(f'metrics.{field} must be a Prometheus metric or label name')
+    if metrics.get('ttft') and not NAME.match(str(metrics['ttft'])):
+        raise Invalid('metrics.ttft must be a Prometheus histogram bucket name')
+    if not re.fullmatch(r'[A-Za-z0-9_-]+', str(metrics.get('failed', ''))):
+        raise Invalid('metrics.failed must be the status label value of a failed request')
+    return merged
+
+
+class Prom:
+    """Runs `dsh-oncall prom` for one environment and returns its result list."""
+
+    def __init__(self, cli, env):
+        self.cli, self.env = cli, env
+
+    def run(self, *args):
+        result = subprocess.run([self.cli, 'prom', '--env', self.env, *args], capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            raise RuntimeError(f'dsh-oncall prom {args[0]} on {self.env} exited {result.returncode}: {(result.stderr or result.stdout).strip()[-500:]}')
+        return json.loads(result.stdout).get('result', [])
+
+    def vector(self, query, label):
+        """`{label value: number}` of an instant query."""
+        out = {}
+        for item in self.run('query', '--query', query):
+            value = float(item['value'][1])
+            if math.isfinite(value):
+                out[item['metric'].get(label, '')] = value
+        return out
+
+    def matrix(self, query, label, start, end):
+        """`{label value: [(epoch seconds, number)]}` of a range query."""
+        out = {}
+        for item in self.run('range', '--query', query, '--from', str(start * 1000), '--to', str(end * 1000), '--step', str(STEP)):
+            points = [(float(t), float(v)) for t, v in item['values'] if math.isfinite(float(v))]
+            out[item['metric'].get(label, '')] = points
+        return out
+
+
+def collect(prom, config, now):
+    """Totals now and a week earlier per provider, and the series the charts draw."""
+    m = config['metrics']
+    req, by, status, failed = m['requests'], m['provider'], m['status'], m['failed']
+    week = f"offset {config['lookbackDays']}d"
+    total = lambda offset='': f'sum by ({by}) (increase({req}[24h] {offset}))'
+    bad = lambda offset='': f'sum by ({by}) (increase({req}{{{status}="{failed}"}}[24h] {offset}))'
+    data = {'now': prom.vector(total(), by), 'before': prom.vector(total(week), by),
+            'failedNow': prom.vector(bad(), by), 'failedBefore': prom.vector(bad(week), by), 'ttftNow': {}, 'ttftBefore': {}}
+    if m.get('ttft'):
+        p95 = lambda offset='': f'histogram_quantile(0.95, sum by (le, {by}) (increase({m["ttft"]}{m.get("ttftSelector", "")}[24h] {offset})))'
+        data['ttftNow'], data['ttftBefore'] = prom.vector(p95(), by), prom.vector(p95(week), by)
+    top = [name for name, value in sorted(data['now'].items(), key=lambda item: -item[1]) if value >= config['minRequests']][:config['top']]
+    data['top'] = top
+    if top:
+        # A regex inside a PromQL string: a metacharacter needs a regex backslash, written doubled in the string.
+        names = '|'.join(re.sub(r'([.^$*+?()\[\]{}|\\])', r'\\\\\1', name) for name in top)
+        start = now - DAY
+        data['rate'] = prom.matrix(f'sum by ({by}) (rate({req}{{{by}=~"{names}"}}[{WINDOW}])) * 60', by, start, now)
+        # Success only where the window held enough requests: a few requests make a ratio swing between 0 and 100%.
+        enough = f'(sum by ({by}) (increase({req}{{{by}=~"{names}"}}[{WINDOW}])) >= {MIN_POINT_REQUESTS})'
+        data['success'] = prom.matrix(
+            f'(1 - (sum by ({by}) (rate({req}{{{by}=~"{names}",{status}="{failed}"}}[{WINDOW}])) or sum by ({by}) (rate({req}{{{by}=~"{names}"}}[{WINDOW}])) * 0)'
+            f' / sum by ({by}) (rate({req}{{{by}=~"{names}"}}[{WINDOW}]))) and {enough}', by, start, now)
+        if m.get('ttft'):
+            data['ttft'] = prom.matrix(f'histogram_quantile(0.95, sum by (le, {by}) (rate({m["ttft"]}{m.get("ttftSelector", "")}[{WINDOW}]))) and {enough}', by, start, now)
+    return data
+
+
+def pct(value):
+    return f'{value * 100:.1f}%'
+
+
+def changes(data, config):
+    """Notable changes against a week earlier, most important first, as `(text lines, count of smaller ones left out)`.
+
+    A provider counts only while it carried at least `minShare` of its environment's traffic in either period. Shares are
+    compared only while the environment's total stayed within `stableTotal`; otherwise every share moves with the total, so
+    volumes are compared instead and no failover shift is inferred.
+    """
+    t = config['thresholds']
+    now_total, before_total = sum(data['now'].values()), sum(data['before'].values())
+    stable = before_total > 0 and abs(now_total / before_total - 1) < t['stableTotal']
+    found, up, down = [], [], []
+    for name in set(data['now']) | set(data['before']):
+        now, before = data['now'].get(name, 0), data['before'].get(name, 0)
+        share_now, share_before = now / (now_total or 1), before / (before_total or 1)
+        if max(now, before) < config['minRequests'] or max(share_now, share_before) < t['minShare']:
+            continue
+        if now >= config['minRequests'] and before >= config['minRequests']:
+            ok_now, ok_before = 1 - data['failedNow'].get(name, 0) / now, 1 - data['failedBefore'].get(name, 0) / before
+            if ok_before - ok_now >= t['successDrop']:
+                # Failures come first, ranked by the requests the drop failed; then slowdowns; then traffic moves.
+                found.append(((2, (ok_before - ok_now) * now), f'**{name}** 成功率下降：{pct(ok_before)} → {pct(ok_now)}（{now:,.0f} 次请求）'))
+        ttft_now, ttft_before = data['ttftNow'].get(name), data['ttftBefore'].get(name)
+        if ttft_now and ttft_before and ttft_now / ttft_before >= t['ttftRatio'] and now >= config['minRequests']:
+            found.append(((1, now * (ttft_now / ttft_before - 1)), f'**{name}** 流式首字 P95 变慢：{ttft_before:.1f}s → {ttft_now:.1f}s'))
+        if before < config['minRequests']:
+            found.append(((0, now), f'**{name}** 新增流量：{now:,.0f} 次，占 {pct(share_now)}'))
+            up.append((now, name))
+        elif now < config['minRequests']:
+            found.append(((0, before), f'**{name}** 几乎没有流量了：{before:,.0f} → {now:,.0f} 次'))
+            down.append((before, name))
+        else:
+            moved = abs(share_now - share_before) >= t['shareDelta'] if stable else False
+            if moved or abs(now / before - 1) >= t['volumeChange']:
+                word = '上升' if now > before else '下降'
+                share = f'，占比 {pct(share_before)} → {pct(share_now)}' if stable else ''
+                found.append(((0, abs(now - before)), f'**{name}** 流量{word}：{before:,.0f} → {now:,.0f} 次（{now / before - 1:+.0%}）{share}'))
+                (up if now > before else down).append((abs(now - before), name))
+    found.sort(key=lambda item: item[0], reverse=True)
+    lines = [text for _, text in found[:t['maxLines']]]
+    if stable and up and down:
+        names = lambda items: '、'.join(name for _, name in sorted(items, reverse=True)[:3])
+        lines.append(f'流量从 {names(down)} 转到 {names(up)}，可能是路由或 failover 的变化')
+    return lines, max(0, len(found) - t['maxLines'])
+
+
+def report(env, data, config):
+    """The markdown part of one environment."""
+    now_total, before_total = sum(data['now'].values()), sum(data['before'].values())
+    head = f'**{env.get("label") or env["env"]}**：24 小时 {now_total:,.0f} 次请求'
+    if before_total:
+        head += f'（{config["lookbackDays"]} 天前 {before_total:,.0f}，{now_total / before_total - 1:+.0%}）'
+    lines = [head]
+    notable, left = changes(data, config)
+    lines += [f'- {line}' for line in notable] if notable else [f'- 和 {config["lookbackDays"]} 天前相比没有明显变化']
+    if left:
+        lines.append(f'- 另有 {left} 项较小的变化没有列出')
+    rows = []
+    for name in data['top'][:5]:
+        now = data['now'][name]
+        ok = 1 - data['failedNow'].get(name, 0) / now
+        ttft = data['ttftNow'].get(name)
+        rows.append(f'{name} {pct(now / (now_total or 1))}（成功率 {pct(ok)}' + (f'，首字 P95 {ttft:.1f}s' if ttft else '') + '）')
+    if rows:
+        lines.append('流量前五：' + '，'.join(rows))
+    return '\n'.join(lines)
+
+
+def chart(env, data, path, tz):
+    """Draws the series of one environment into a PNG; returns False when there is nothing to draw."""
+    import matplotlib
+    matplotlib.use('Agg')
+    from matplotlib import font_manager, pyplot, dates
+    if Path(CHART_FONT).exists():
+        font_manager.fontManager.addfont(CHART_FONT)
+        matplotlib.rcParams['font.family'] = font_manager.FontProperties(fname=CHART_FONT).get_name()
+    panels = [(key, title) for key, title in (('rate', '请求量（次/分钟）'), ('success', '成功率'), ('ttft', '流式首字 P95（秒）')) if data.get(key)]
+    if not panels:
+        return False
+    figure, axes = pyplot.subplots(len(panels), 1, figsize=(11, 3.2 * len(panels)), sharex=True, squeeze=False)
+    for (key, title), axis in zip(panels, axes[:, 0]):
+        drawn = []
+        for name in data['top'][:CHART_LINES]:
+            points = data[key].get(name)
+            if points:
+                axis.plot([datetime.datetime.fromtimestamp(t, tz) for t, _ in points], [v for _, v in points], label=name, linewidth=1.6)
+                drawn += [v for _, v in points]
+        axis.set_title(title, loc='left', fontsize=11)
+        axis.grid(alpha=0.3)
+        if key == 'success':
+            axis.yaxis.set_major_formatter(matplotlib.ticker.PercentFormatter(1.0))
+            axis.set_ylim(max(0, min(drawn, default=0) - 0.05), 1.01)
+        elif key == 'ttft' and drawn:
+            # A few slow outliers would flatten every other line; the axis stops a little above the 90th percentile.
+            ordered = sorted(drawn)
+            axis.set_ylim(0, ordered[int(len(ordered) * 0.9)] * 1.5 or 1)
+    axes[0, 0].legend(fontsize=8, ncol=4, loc='upper left', frameon=False)
+    axes[-1, 0].xaxis.set_major_formatter(dates.DateFormatter('%H:%M', tz=tz))
+    figure.suptitle(f'{env.get("label") or env["env"]}：过去 24 小时', x=0.01, ha='left', fontsize=13)
+    figure.tight_layout()
+    figure.savefig(path, dpi=110)
+    pyplot.close(figure)
+    return True
+
+
+def post(lark, chat, out, text, images):
+    """Sends the text, then each chart, to the chat; images are passed relative to `out` as lark-cli requires."""
+    (out / 'digest.md').write_text(text)
+    for args in [['--markdown', '@digest.md'], *[['--image', image.name] for image in images]]:
+        result = subprocess.run([lark, 'im', '+messages-send', '--chat-id', chat, *args, '--as', 'bot'], cwd=out, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            raise RuntimeError(f'lark-cli send exited {result.returncode}: {(result.stderr or result.stdout).strip()[-500:]}')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--config', required=True)
+    parser.add_argument('--dsh-oncall', default='dsh-oncall')
+    parser.add_argument('--lark-cli', default='lark-bot')
+    parser.add_argument('--chat', help='post to this chat instead of the config\'s, for a test')
+    parser.add_argument('--out', type=Path, help='keep the text and charts in this directory')
+    parser.add_argument('--dry-run', action='store_true', help='print the text and write the charts, post nothing')
+    parser.add_argument('--no-charts', action='store_true')
+    parser.add_argument('--now', type=int, help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    try:
+        config = load_config(args.config)
+        if args.chat and not re.fullmatch(r'oc_[A-Za-z0-9]+', args.chat):
+            raise Invalid('--chat must be a Feishu chat id (oc_...)')
+    except Invalid as error:
+        print(f'oncall-digest: {error}', file=sys.stderr)
+        return 2
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo(config['timeZone'])
+    now = args.now or int(datetime.datetime.now(datetime.timezone.utc).timestamp()) // STEP * STEP
+    out = args.out or Path(tempfile.mkdtemp(prefix='oncall-digest-'))
+    out.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.datetime.fromtimestamp(now, tz).strftime('%m-%d %H:%M')
+    parts = [f'**渠道日报 {stamp}**（过去 24 小时，对比 {config["lookbackDays"]} 天前的同一时段）']
+    images, failures = [], []
+    for env in config['envs']:
+        try:
+            data = collect(Prom(args.dsh_oncall, env['env']), config, now)
+        except (RuntimeError, ValueError, KeyError, subprocess.TimeoutExpired) as error:
+            failures.append(f'{env["env"]}: {error}')
+            parts.append(f'**{env.get("label") or env["env"]}**：读取指标失败，见服务器日志')
+            continue
+        parts.append(report(env, data, config))
+        if not args.no_charts:
+            path = out / f'{env["env"]}.png'
+            if chart(env, data, path, tz):
+                images.append(path)
+    parts.append('想细看某一项，在群里 @ 值班机器人问，比如「看下 <渠道> 最近 24 小时为什么下降」。')
+    text = '\n\n'.join(parts)
+    if args.dry_run:
+        print(text)
+        print('charts: ' + ', '.join(str(image) for image in images))
+    else:
+        try:
+            post(args.lark_cli, args.chat or config['chat'], out, text, images)
+        except (RuntimeError, subprocess.TimeoutExpired) as error:
+            print(f'oncall-digest: {error}', file=sys.stderr)
+            return 1
+    for failure in failures:
+        print(f'oncall-digest: {failure}', file=sys.stderr)
+    return 1 if failures and len(failures) == len(config['envs']) else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
