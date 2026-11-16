@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""Check a dsh-superagent service once, restart it when it is down, and tell a Feishu chat what needs a person.
+
+Run it from cron, for example hourly. It runs `scripts/dsh-superagent status`:
+
+- exit 0: nothing to do; if it reported a problem before, it posts that the service recovered, once;
+- exit 1 (stopped, duplicated or not answering): unless a person stopped it, it runs `--respect-stop restart` and posts
+  whether that brought it back;
+- exit 2 (a part such as a Source reports an error) or 3 (it waits for setup): a restart does not fix these, so it only
+  posts what `status` reports.
+
+The same problem is posted at most once per --repeat-hours; the state file remembers what was posted. Messages name the
+parts and their details, never credentials. Exit 0 when the check ran (whatever the service's state), 1 when it could
+not post or run the service script, 2 for a bad argument.
+
+  oncall-health --profile oncall --url http://127.0.0.1:3182 --chat oc_... [--lark-cli lark-bot] [--dry-run]
+"""
+
+import argparse
+import datetime
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+
+ROOT = Path(__file__).resolve().parent.parent
+SERVICE = ROOT / 'scripts' / 'dsh-superagent'
+DETAIL_CHARS = 300
+SHANGHAI = datetime.timezone(datetime.timedelta(hours=8))
+
+
+class Invalid(Exception):
+    """A bad argument."""
+
+
+def service(args, *action):
+    """Run the service script and return `(exit code, the JSON it printed last or None)`."""
+    command = [sys.executable, str(SERVICE), '--profile', args.profile, '--url', args.url, *action]
+    result = subprocess.run(command, capture_output=True, text=True, timeout=900, check=False)
+    start = result.stdout.find('{')
+    try:
+        report = json.loads(result.stdout[start:]) if start >= 0 else None
+    except ValueError:
+        report = None
+    return result.returncode, report, (result.stderr or '').strip()[-DETAIL_CHARS:]
+
+
+def problem_lines(code, report, stderr):
+    """What a person should know about a status that is not 0, one line per part."""
+    report = report or {}
+    if code == 2:
+        return [f'- `{name}`: {str(detail)[:DETAIL_CHARS]}' for name, detail in sorted((report.get('errors') or {}).items()) if name != 'runtime']
+    if code == 3:
+        setup = report.get('setup') or {}
+        return [f'- 等待设置：{str(setup.get("detail", setup))[:DETAIL_CHARS]}']
+    pids = report.get('pids') or []
+    reason = '没有在运行' if not pids else f'有 {len(pids)} 个进程' if len(pids) > 1 else '不应答或运行时报错'
+    return [f'- 服务{reason}' + (f'：{stderr}' if stderr else '')]
+
+
+def fingerprint(code, lines):
+    return hashlib.sha256(json.dumps([code, lines], ensure_ascii=False).encode()).hexdigest()[:16]
+
+
+def post(lark, chat, text):
+    """Send `text` as Markdown to `chat` with a bot-only lark-cli."""
+    with tempfile.TemporaryDirectory(prefix='oncall-health-') as scratch:
+        Path(scratch, 'health.md').write_text(text)
+        result = subprocess.run([lark, 'im', '+messages-send', '--chat-id', chat, '--markdown', '@health.md', '--as', 'bot'],
+                                cwd=scratch, capture_output=True, text=True, timeout=120, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(f'lark-cli send exited {result.returncode}: {(result.stderr or result.stdout).strip()[-300:]}')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--profile', default=os.environ.get('DSH_SUPERAGENT_PROFILE') or 'superagent')
+    parser.add_argument('--url', default=os.environ.get('DSH_SUPERAGENT_URL') or 'http://127.0.0.1:3082')
+    parser.add_argument('--chat', required=True, help='the Feishu chat id to post to')
+    parser.add_argument('--lark-cli', default='lark-bot', help='a lark-cli that may act only as the bot')
+    parser.add_argument('--state', type=Path, default=Path.home() / '.local' / 'state' / 'oncall-health.json',
+                        help='what was posted last (default ~/.local/state/oncall-health.json)')
+    parser.add_argument('--repeat-hours', type=float, default=6, help='post the same problem again after this long (default 6)')
+    parser.add_argument('--dry-run', action='store_true', help='print the message; restart, post and write nothing')
+    args = parser.parse_args()
+    try:
+        if not re.fullmatch(r'oc_[A-Za-z0-9]+', args.chat):
+            raise Invalid('--chat must be a Feishu chat id (oc_...)')
+        if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', args.profile):
+            raise Invalid('--profile must be a DSH profile name')
+        if args.repeat_hours <= 0:
+            raise Invalid('--repeat-hours must be positive')
+    except Invalid as error:
+        print(f'oncall-health: {error}', file=sys.stderr)
+        return 2
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    try:
+        last = json.loads(args.state.read_text()) if args.state.exists() else {}
+    except ValueError:
+        last = {}
+    try:
+        code, report, stderr = service(args, 'status')
+        restarted = None
+        if code == 1 and not (report or {}).get('manually_stopped'):
+            if args.dry_run:
+                print('would run: dsh-superagent --respect-stop restart')
+            else:
+                restarted, _, restart_error = service(args, '--respect-stop', 'restart')
+                code, report, stderr = service(args, 'status')
+                stderr = stderr or restart_error
+        if code == 0 or (code == 1 and (report or {}).get('manually_stopped')):
+            text = None
+            if last.get('fingerprint') and code == 0:
+                text = f'**dsh-superagent（{args.profile}）已恢复正常**' + ('，自动重启后恢复。' if restarted == 0 else '。')
+            elif restarted == 0:
+                text = f'**dsh-superagent（{args.profile}）停止应答，已自动重启并恢复正常。**'
+            state = {}
+        else:
+            lines = problem_lines(code, report, stderr)
+            posted_at = datetime.datetime.fromisoformat(last['at']) if last.get('at') else None
+            same = last.get('fingerprint') == fingerprint(code, lines)
+            due = not same or posted_at is None or (now - posted_at).total_seconds() >= args.repeat_hours * 3600
+            head = {1: '服务停止应答，自动重启没有恢复', 2: '有部分报错，重启修不好，需要人处理', 3: '在等待设置，需要人处理'}[code if code in (1, 2, 3) else 1]
+            text = (f'**dsh-superagent（{args.profile}）{head}**\n' + '\n'.join(lines)
+                    + f'\n\n检查时间 {now.astimezone(SHANGHAI):%m-%d %H:%M}；排查见 docs/006-deployment.md 的 Troubleshooting。') if due else None
+            state = {'fingerprint': fingerprint(code, lines), 'at': (now if due else posted_at).isoformat()}
+        if text and args.dry_run:
+            print(text)
+            return 0
+        if text:
+            post(args.lark_cli, args.chat, text)
+        if not args.dry_run:
+            args.state.parent.mkdir(parents=True, exist_ok=True)
+            args.state.write_text(json.dumps(state) + '\n')
+        print(f'oncall-health: status {code}' + ('; posted' if text else ''))
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+        print(f'oncall-health: {error}', file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
