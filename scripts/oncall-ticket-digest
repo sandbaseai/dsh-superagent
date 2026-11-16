@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Group the last day's on-call tickets by root cause, keep the list of known open issues, and post a digest to Feishu.
 
-It reads the dsh-superagent database read-only (ticket titles and the conclusions of their reports), asks the model
+It reads the tickets (titles and the conclusions of their reports) through the dsh-superagent management API, asks the model
 through the Anthropic-compatible gateway to group them and to match them with the known issues, writes the updated
 list as JSON and as Markdown (which workers read with `dsh-oncall known` before investigating), and posts the digest
 with a bot-only lark-cli. It changes no system and no setting.
 
-  oncall-ticket-digest --state-dir DIR --known FILE --chat oc_... [--hours 24] [--dry-run]
+  oncall-ticket-digest [--url http://127.0.0.1:3082] --known FILE --chat oc_... [--hours 24] [--dry-run]
 
-Exit 0 posted (or printed with --dry-run), 1 the model, the database or the post failed, 2 a bad argument.
+Exit 0 posted (or printed with --dry-run), 1 the model, the management API or the post failed, 2 a bad argument.
 """
 
 import argparse
@@ -17,7 +17,6 @@ import json
 import os
 from pathlib import Path
 import re
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -26,6 +25,7 @@ import urllib.request
 
 CONCLUSION_CHARS = 400
 MAX_TICKETS = 150
+PAGE = 200
 # A known issue with no ticket for this long is marked quiet; one quiet this long is dropped from the list.
 QUIET_HOURS = 48
 DROP_DAYS = 7
@@ -76,22 +76,37 @@ def conclusion(summary):
     return text[:CONCLUSION_CHARS]
 
 
-def read_tickets(state_dir, since):
-    """`[{id, at, title, conclusion}]` of the tickets created since `since`, oldest first, from the read-only database."""
-    path = Path(state_dir) / 'orchestrator.sqlite'
-    if not path.exists():
-        raise RuntimeError(f'no database at {path}')
-    with sqlite3.connect(f'file:{path}?mode=ro', uri=True) as db:
-        rows = [json.loads(value) for (value,) in db.execute('SELECT value FROM ticket')]
+def management(url, path):
+    """GET `path` of the dsh-superagent management API at `url`, which accepts the panel's marker header on loopback only."""
+    request = urllib.request.Request(url.rstrip('/') + '/orchestrator/api/' + path,
+                                     headers={'x-orchestrator-request': '1', 'accept': 'application/json'})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        raise RuntimeError(f'GET {path} answered {error.code}') from None
+    except urllib.error.URLError as error:
+        raise RuntimeError(f'GET {path} failed: {error.reason}') from None
+
+
+def read_tickets(url, since):
+    """`[{id, at, title, outcome, conclusion}]` of the tickets created since `since`, oldest first, from the management API."""
     tickets = []
-    for ticket in rows:
-        at = parse_time(ticket['createdAt'])
-        if at < since:
-            continue
-        report = next((item['report'] for item in reversed(ticket.get('assignments') or []) if item.get('report')), None)
-        tickets.append({'id': ticket['id'][:8], 'at': at.astimezone(SHANGHAI).strftime('%m-%d %H:%M'), 'title': ticket['title'][:160],
-                        'outcome': (ticket.get('ended') or {}).get('outcome', 'open'),
-                        'conclusion': conclusion((report or {}).get('summary', ''))})
+    for state in ('ended', 'open'):
+        offset = 0
+        while offset is not None:
+            listed = management(url, f'tickets?state={state}&offset={offset}&limit={PAGE}')
+            items = listed.get('items') or []
+            for ticket in items:
+                at = parse_time(ticket['createdAt'])
+                if at >= since:
+                    tickets.append({'id': ticket['id'][:8], 'at': at.astimezone(SHANGHAI).strftime('%m-%d %H:%M'), 'title': ticket['title'][:160],
+                                    'outcome': (ticket.get('ended') or {}).get('outcome', 'open'),
+                                    'conclusion': conclusion(ticket.get('summary', ''))})
+            # Lists put the most recently updated first, and a ticket is updated no earlier than it was created.
+            offset = listed.get('next_offset')
+            if items and parse_time(items[-1]['updatedAt']) < since:
+                offset = None
     tickets.sort(key=lambda item: item['at'])
     return tickets[-MAX_TICKETS:]
 
@@ -206,7 +221,8 @@ def post(lark, chat, text):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--state-dir', required=True, help="the plugin's stateDir, which holds orchestrator.sqlite")
+    parser.add_argument('--url', default=os.environ.get('DSH_SUPERAGENT_URL') or 'http://127.0.0.1:3082',
+                        help='the dsh-superagent management API on loopback (default http://127.0.0.1:3082)')
     parser.add_argument('--known', required=True, type=Path, help='the known-issues JSON; a .md beside it is written for workers')
     parser.add_argument('--chat', required=True, help='the Feishu chat id to post to')
     parser.add_argument('--hours', type=int, default=24)
@@ -220,6 +236,8 @@ def main():
     try:
         if not re.fullmatch(r'oc_[A-Za-z0-9]+', args.chat):
             raise Invalid('--chat must be a Feishu chat id (oc_...)')
+        if not re.fullmatch(r'http://(127\.0\.0\.1|localhost)(:\d+)?/?', args.url):
+            raise Invalid('--url must be the loopback management API, such as http://127.0.0.1:3082')
         if not 1 <= args.hours <= 168:
             raise Invalid('--hours must be 1-168')
         if not args.base_url.startswith('https://') or not args.model:
@@ -229,7 +247,7 @@ def main():
         return 2
     now = now_utc()
     try:
-        tickets = read_tickets(args.state_dir, now - datetime.timedelta(hours=args.hours))
+        tickets = read_tickets(args.url, now - datetime.timedelta(hours=args.hours))
         known = json.loads(args.known.read_text()) if args.known.exists() else []
         if tickets:
             prompt = PROMPT.format(hours=args.hours, known=json.dumps([{k: entry.get(k) for k in ('key', 'title', 'cause', 'status')} for entry in known],
@@ -247,7 +265,7 @@ def main():
         args.known.write_text(json.dumps(known, ensure_ascii=False, indent=1) + '\n')
         args.known.with_suffix('.md').write_text(known_markdown(known, now))
         post(args.lark_cli, args.chat, text)
-    except (RuntimeError, OSError, ValueError, sqlite3.Error, subprocess.TimeoutExpired) as error:
+    except (RuntimeError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as error:
         print(f'oncall-ticket-digest: {error}', file=sys.stderr)
         return 1
     return 0
