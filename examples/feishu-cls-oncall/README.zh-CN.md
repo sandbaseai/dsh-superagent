@@ -298,13 +298,13 @@ worker 排查前先跑 `dsh-oncall known` 看这份清单。新告警如果是�
 Check dsh-superagent: run `scripts/dsh-superagent --profile superagent status` in <checkout>. Exit 0: do nothing and say nothing. Exit 2: do not restart; tell me each part under `errors` with its detail, unless you already told me about the same ones. Exit 3: do not restart; tell me what `setup` says setup needs, unless you already told me. If it reports manually_stopped: true, leave it stopped. Otherwise (exit 1) run `scripts/dsh-superagent --profile superagent --respect-stop restart`, which exits the same way: 0 means it recovered, so say nothing; 2 and 3 are reported as above; if it exits 1 or fails otherwise, read the newest .artifacts/dsh-superagent-superagent-*.log and the Troubleshooting section of docs/006-deployment.md, fix what you can, and tell me what was wrong and what you did.
 ```
 
-不用智能体也可以：用 launchd 或 cron 每小时跑一次，只在 `status` 退出 1 时重启：
+不用智能体，推荐用 `scripts/oncall-health` 从 cron 每小时跑一次：服务停了（不是人为 `stop`）就用 `--respect-stop restart` 拉起，并在飞书群里说一声；部分报错（`status` 退出 2）或等待设置（退出 3）重启修不好，只发消息说明哪一部分、什么问题。同一个问题 6 小时内只发一次，恢复后发一条“已恢复正常”：
 
 ```sh
-cd <checkout> && { scripts/dsh-superagent --profile superagent status >/dev/null; [ $? -eq 1 ] && scripts/dsh-superagent --profile superagent --respect-stop restart; }
+5 * * * * cd $HOME && PATH=$HOME/.local/bin:$PATH python3 $HOME/dsh-superagent/scripts/oncall-health --profile <profile> --url http://127.0.0.1:<port> --chat <oc_...> --lark-cli $HOME/.local/bin/lark-bot >> $HOME/oncall-health.log 2>&1
 ```
 
-`--respect-stop` 保留人为的 `stop`。
+`PATH` 里要有 `dsh` 和 `tmux`，重启要用到。`--dry-run` 只打印要发的消息，不重启也不发。
 
 ## 故障排查
 
