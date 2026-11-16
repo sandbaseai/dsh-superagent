@@ -887,8 +887,10 @@ LIMIT = re.compile(r'\blimit\s+(\d+)(\s*,\s*(\d+))?\s*$', re.I)
 FORBIDDEN_SQL = re.compile(r'\binto\s+(outfile|dumpfile|@)|\bfor\s+update\b|\block\s+in\s+share\s+mode\b|\b(sleep|benchmark|'
                            r'load_file|get_lock|release_lock)\s*\(|\b(insert|update|delete|replace|create|alter|drop|truncate|'
                            r'grant|revoke|set|call|handler|load|lock|unlock|rename|kill|flush|purge|reset|install|uninstall)\b', re.I)
+# Tables that hold credentials: a statement naming one is refused, whatever its columns.
+SECRET_TABLE = re.compile(r'\b(?:from|join|describe|desc|table|columns\s+from|index\s+from)\s+(?:\w+\.)?(\w*(?:credential|secret|password|passwd|token|session_key|api_keys)\w*)', re.I)
 # Column names whose values are credentials or contact details; their values are replaced.
-MASKED_COLUMN = re.compile(r'pass|secret|token|api_?key$|^key$|_key$|cookie|email|phone|mobile|id_card|address', re.I)
+MASKED_COLUMN = re.compile(r'pass|secret|token|api_?key$|^key$|_key$|cookie|email|phone|mobile|id_card|address|_config$|^config$|credential', re.I)
 
 
 def strip_sql(text):
@@ -912,6 +914,11 @@ def check_sql(text):
     found = FORBIDDEN_SQL.search(plain)
     if found and not (plain.lower().startswith('show') and found.group(0).lower() == 'set'):
         raise Refused('refused: db does not run ' + found.group(0).strip() + ': it only reads')
+    # Table names are checked with their backticks removed, so quoting a name does not hide it.
+    unquoted = re.sub(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"", "''", re.sub(r"/\*.*?\*/|--[^\n]*|#[^\n]*", ' ', text, flags=re.S)).replace('`', '')
+    named = SECRET_TABLE.search(unquoted)
+    if named:
+        raise Refused('refused: db does not read the table ' + named.group(1) + ': it may hold credentials')
     if NEEDS_LIMIT.match(plain):
         limit = LIMIT.search(plain)
         rows = int(limit.group(3) or limit.group(1)) if limit else None

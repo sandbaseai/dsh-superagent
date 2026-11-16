@@ -393,7 +393,8 @@ it('runs nothing when the instance behind the proxy is not read-only', async () 
 it.each([
   'DELETE FROM t LIMIT 1', 'SELECT * FROM t', 'SELECT * FROM t LIMIT 500', 'SELECT 1 LIMIT 1; DROP TABLE t',
   "SELECT * FROM t INTO OUTFILE '/tmp/x' LIMIT 1", 'SELECT * FROM t FOR UPDATE LIMIT 1', 'SELECT SLEEP(100) LIMIT 1',
-  'WITH a AS (SELECT 1) SELECT * FROM a', 'SET @x = 1', '/* SELECT */ UPDATE t SET a = 1 LIMIT 1', 'x'.repeat(4001),
+  'WITH a AS (SELECT 1) SELECT * FROM a', 'SET @x = 1', 'SELECT id FROM provider_credentials LIMIT 1', 'SELECT * FROM agents_secrets LIMIT 1',
+  'DESCRIBE api_keys', 'SELECT id FROM `user_password_credentials` LIMIT 1', 'SELECT p.id FROM t JOIN sandbase.oauth_tokens p LIMIT 1', '/* SELECT */ UPDATE t SET a = 1 LIMIT 1', 'x'.repeat(4001),
 ])('refuses db %s before connecting', async query => {
   dbConfig()
   expect(await run(['db', '--env', 'prod', '--query', query])).toMatchObject({ code: 2, stderr: expect.stringMatching(/^refused:/) })
