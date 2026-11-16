@@ -17,18 +17,24 @@ function commit(file: string, text: string): string {
   git(work, 'add', file); git(work, 'commit', '-q', '-m', `set ${file}`); git(work, 'push', '-q', 'origin', 'HEAD:main')
   return git(work, 'rev-parse', 'HEAD')
 }
-/** The stub service: exits with the code in `restart-code` (default 0) for restart, records every call in `service.log`. */
+/**
+ * The stub service records every call with the build it runs in `service.log`. For an action it exits with the code in
+ * `<action>-<build>-code` or `<action>-code` (default 0), and first runs the SQL in `<action>-<build>-sql` on the database.
+ */
 function stubService() {
   writeFileSync(join(work, 'scripts', 'dsh-superagent'), `#!/usr/bin/env python3
 import sys, pathlib
 root = pathlib.Path(${JSON.stringify(root)})
-with (root / 'service.log').open('a') as log: log.write(' '.join(sys.argv[1:2]) + ' ' + (pathlib.Path.cwd() / 'BUILT').read_text().strip() + '\\n') if (pathlib.Path.cwd() / 'BUILT').exists() else None
-sql = root / (sys.argv[1] + '-sql')
+action = sys.argv[1]
+built = (pathlib.Path.cwd() / 'BUILT').read_text().strip() if (pathlib.Path.cwd() / 'BUILT').exists() else ''
+with (root / 'service.log').open('a') as log: log.write(action + ' ' + built + '\\n')
+sql = root / (action + '-' + built + '-sql')
 if sql.exists():
     import sqlite3
-    with sqlite3.connect(${JSON.stringify(join(state, 'orchestrator.sqlite'))}) as db: db.execute(sql.read_text())
-code = root / (sys.argv[1] + '-code')
-sys.exit(int(code.read_text()) if code.exists() else 0)
+    with sqlite3.connect(${JSON.stringify(join(state, 'orchestrator.sqlite'))}) as db: db.executescript(sql.read_text())
+codes = [root / (action + '-' + built + '-code'), root / (action + '-code')]
+code = next((path for path in codes if path.exists()), None)
+sys.exit(int(code.read_text()) if code else 0)
 `, { mode: 0o755 })
 }
 beforeEach(() => {
@@ -66,14 +72,15 @@ const built = () => readFileSync(join(work, 'BUILT'), 'utf8').trim()
 const deployLog = () => readFileSync(join(root, 'deploy.log'), 'utf8')
 const rows = () => { const db = new DatabaseSync(join(state, 'orchestrator.sqlite')); const v = db.prepare('select v from t').all(); db.close(); return v }
 
-it('builds the tip of origin/main, backs up the database, restarts, and logs the commit', async () => {
+it('builds the tip of origin/main in a worktree, stops the service, backs up the database, starts the new build, and logs it', async () => {
   const v1 = commit('VERSION', 'v1'); git(work, 'checkout', '-q', '--detach', v1); writeFileSync(join(work, 'BUILT'), 'v1')
   const v2 = commit('VERSION', 'v2'); git(work, 'checkout', '-q', '--detach', v1)
   const result = await deploy()
   expect(result.code, result.stderr).toBe(0)
   expect(head()).toBe(v2)
   expect(built()).toBe('v2')
-  expect(readFileSync(join(root, 'service.log'), 'utf8')).toBe('restart v2\n')
+  expect(readFileSync(join(root, 'service.log'), 'utf8')).toBe('stop v1\nstart v2\n')
+  expect(git(work, 'worktree', 'list').split('\n')).toHaveLength(1)
   expect(readdirSync(join(root, 'backups')).filter(name => name.endsWith('.sqlite'))).toHaveLength(1)
   expect(deployLog()).toMatch(new RegExp(`${v2.slice(0, 7)} set VERSION deployed \\(was ${v1.slice(0, 7)}\\)`))
 })
@@ -131,27 +138,49 @@ it('keeps the running service when the build fails, and returns to the previous 
   expect(built()).toBe('v1')
   expect(existsSync(join(root, 'service.log'))).toBe(false)
   expect(deployLog()).toContain(`${bad.slice(0, 7)} FAILED build; kept ${v1.slice(0, 7)} running`)
+  expect(git(work, 'worktree', 'list').split('\n')).toHaveLength(1)
 })
 
-it('rolls back the code and the database when the restart is unhealthy', async () => {
+it('rolls back the code and keeps the database when the new build starts unhealthy without changing its schema', async () => {
   const v1 = commit('VERSION', 'v1'); git(work, 'checkout', '-q', '--detach', v1); writeFileSync(join(work, 'BUILT'), 'v1')
   const v2 = commit('VERSION', 'v2'); git(work, 'checkout', '-q', '--detach', v1)
-  writeFileSync(join(root, 'restart-code'), '1')
-  // The new service migrates the database during its restart, then turns out unhealthy; the rollback restores the backup.
-  writeFileSync(join(root, 'restart-sql'), "insert into t values ('v2')")
+  writeFileSync(join(root, 'start-v2-code'), '1')
+  // What the new build recorded before it turned out unhealthy, such as the receipt of a message it sent, stays.
+  writeFileSync(join(root, 'start-v2-sql'), "insert into t values ('v2')")
   const result = await deploy()
-  expect(result.code, `${result.stdout}\n${result.stderr}\n${existsSync(join(root, 'deploy.log')) ? deployLog() : ''}`).toBe(1)
+  expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(1)
   expect(head()).toBe(v1)
   expect(built()).toBe('v1')
-  expect(readFileSync(join(root, 'service.log'), 'utf8')).toBe('restart v2\nstop v2\nstart v1\n')
+  expect(readFileSync(join(root, 'service.log'), 'utf8')).toBe('stop v1\nstart v2\nstop v2\nstart v1\n')
+  expect(rows()).toEqual([{ v: 'v1' }, { v: 'v2' }])
+  expect(deployLog()).toContain(`${v2.slice(0, 7)} FAILED start (1); rolled back to ${v1.slice(0, 7)}`)
+})
+
+it('restores the database backup when the unhealthy new build changed the schema', async () => {
+  const v1 = commit('VERSION', 'v1'); git(work, 'checkout', '-q', '--detach', v1); writeFileSync(join(work, 'BUILT'), 'v1')
+  commit('VERSION', 'v2'); git(work, 'checkout', '-q', '--detach', v1)
+  writeFileSync(join(root, 'start-v2-code'), '1')
+  writeFileSync(join(root, 'start-v2-sql'), "create table kv (key text, value); insert into kv values ('schema', 12); insert into t values ('v2')")
+  const result = await deploy()
+  expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(1)
+  expect(result.stdout).toContain('the failed version changed its schema')
   expect(rows()).toEqual([{ v: 'v1' }])
-  expect(deployLog()).toContain(`${v2.slice(0, 7)} FAILED restart (1); rolled back to ${v1.slice(0, 7)}`)
+})
+
+it('starts the previous version again and changes nothing when the service does not stop', async () => {
+  const v1 = commit('VERSION', 'v1'); git(work, 'checkout', '-q', '--detach', v1); writeFileSync(join(work, 'BUILT'), 'v1')
+  commit('VERSION', 'v2'); git(work, 'checkout', '-q', '--detach', v1)
+  writeFileSync(join(root, 'stop-code'), '1')
+  expect((await deploy()).code).toBe(1)
+  expect(head()).toBe(v1)
+  expect(readFileSync(join(root, 'service.log'), 'utf8')).toBe('stop v1\nstart v1\n')
+  expect(deployLog()).toContain('the service did not stop')
 })
 
 it('exits 3 when the rolled-back service does not come up either', async () => {
   const v1 = commit('VERSION', 'v1'); git(work, 'checkout', '-q', '--detach', v1); writeFileSync(join(work, 'BUILT'), 'v1')
   commit('VERSION', 'v2'); git(work, 'checkout', '-q', '--detach', v1)
-  writeFileSync(join(root, 'restart-code'), '1'); writeFileSync(join(root, 'start-code'), '1')
+  writeFileSync(join(root, 'start-code'), '1')
   expect((await deploy()).code).toBe(3)
   expect(deployLog()).toContain('but it exits 1')
 })
