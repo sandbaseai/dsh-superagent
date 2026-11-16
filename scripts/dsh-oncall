@@ -205,6 +205,18 @@ def routing(values):
     return facts
 
 
+def command_known():
+    """Print the known open issues the daily ticket digest keeps in the config directory, or say there is no list yet."""
+    path = config_dir() / 'known-issues.md'
+    try:
+        text = path.read_text(encoding='utf-8')
+    except FileNotFoundError:
+        sys.stdout.write('No known-issues list yet: investigate the alarm on its own.\n')
+        return 0
+    sys.stdout.write(cut(text, MAX_OUTPUT)[0])
+    return 0
+
+
 def command_envs(_args):
     """List the configured environments, their tool groups and routing facts, never credentials, topic ids or endpoints."""
     directory = config_dir()
@@ -1034,6 +1046,7 @@ def command_grafana(args):
 
 USAGE = """usage:
   dsh-oncall envs
+  dsh-oncall known
   dsh-oncall cls --env E --query Q [--topic ID_OR_NAME] [--from -15m] [--to now] [--limit 50] [--sort desc]
   dsh-oncall kube --env E <kubectl read args...>
   dsh-oncall monitor --env E --action GetMonitorData|DescribeAlarmHistories|DescribeBaseMetrics|DescribeAlarmPolicies
@@ -1116,6 +1129,10 @@ def run(argv):
         sys.stdout.write(USAGE)
         return 0 if argv else 2
     command, rest = argv[0], argv[1:]
+    if command == 'known':
+        if rest:
+            raise Refused('refused: known takes no arguments')
+        return command_known()
     if command == 'envs':
         if rest:
             raise Refused('refused: envs takes no arguments')

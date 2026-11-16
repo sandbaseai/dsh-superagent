@@ -88,6 +88,12 @@ it('lists environments with their tool groups and no values', async () => {
     { name: 'test', tools: ['grafana'] }])
   for (const secret of [SECRET_ID, SECRET_KEY, GRAFANA_TOKEN, 'grafana.example']) expect(result.stdout + result.stderr).not.toContain(secret)
 })
+it('prints the known-issues list the ticket digest keeps, or says there is none yet', async () => {
+  expect(await run(['known'])).toMatchObject({ code: 0, stdout: expect.stringContaining('No known-issues list yet') })
+  writeFileSync(join(root, 'config', 'known-issues.md'), '# 已知问题\n- **provider-a 计费停用**\n')
+  expect(await run(['known'])).toMatchObject({ code: 0, stdout: '# 已知问题\n- **provider-a 计费停用**\n' })
+  expect(await run(['known', 'extra'])).toMatchObject({ code: 2 })
+})
 it('lists the description, regions and topic names that route an alert, never topic ids or endpoints', async () => {
   config('prod-a', [`CLS_SECRET_ID=${SECRET_ID}`, `CLS_SECRET_KEY=${SECRET_KEY}`, 'CLS_REGION=ap-singapore',
     'CLS_TOPIC_ID=11111111-0000-4000-8000-000000000001', 'CLS_TOPICS=apiserver=22222222-0000-4000-8000-000000000002,gateway=33333333-0000-4000-8000-000000000003',

@@ -4,6 +4,8 @@ This is the generic example shipped with dsh-superagent. Replace the environment
 
 ## 1. Parse the alert
 
+Before investigating, run `dsh-oncall known`: it lists the known open issues the daily ticket digest keeps. When the alarm matches one, confirm with one or two queries that the cause is unchanged and what is new, answer with 已知问题：<title> and its first-seen time in **结论**, and stop there; investigate in full only when the evidence shows a different cause.
+
 The alert chat receives these formats; the trigger text is the message rendered as plain text.
 
 - **Tencent Cloud Observability card** (title `🟥腾讯云可观测平台告警` firing, `🟩腾讯云可观测平台告警` recovered). The second line names the kind (`…的Prometheus告警`, `…的云产品监控告警`, CLS for 日志服务) and the status: `已触发` (firing), `持续触发` (still firing, a periodic repeat), `已恢复` / `恢复` (recovered).

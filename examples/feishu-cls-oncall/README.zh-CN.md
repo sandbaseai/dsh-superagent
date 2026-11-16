@@ -264,6 +264,20 @@ python3 -m venv ~/.venvs/digest && ~/.venvs/digest/bin/pip install matplotlib
 7 9 * * * cd $HOME && PATH=$HOME/.local/bin:$PATH $HOME/.venvs/digest/bin/python $HOME/dsh-superagent/scripts/oncall-digest --config $HOME/kit-local/digest.json >> $HOME/digest.log 2>&1
 ```
 
+## 工单日报和已知问题
+
+`scripts/oncall-ticket-digest` 每天汇总一次过去 24 小时的工单。它只读地读取 dsh-superagent 的数据库（工单标题和报告里的结论），请模型按根因把工单归类，并和已有的「已知问题」对应起来，然后：
+- 把日报发到告警群：先列需要人处理的问题（多少张工单、该找谁、建议做什么），再列无需处理的。
+- 更新已知问题清单 `~/.config/dsh-oncall/known-issues.json`，同时写一份 `known-issues.md`。两天没有新工单的问题标为安静，一周后从清单里移除。
+
+worker 排查前先跑 `dsh-oncall known` 看这份清单。新告警如果是已知问题，就用一两条查询确认原因没变，然后简短回复，不再从头排查。
+
+模型走 profile 里同一个 Anthropic 兼容网关，key 从 `~/.dsh/.credentials.yaml` 里的 `ONCALL_LLM_API_KEY` 读取，不会打印出来。cron 示例：
+
+```bash
+17 9 * * * cd $HOME && PATH=$HOME/.local/bin:$PATH python3 $HOME/dsh-superagent/scripts/oncall-ticket-digest --state-dir $HOME/state/<profile> --known $HOME/.config/dsh-oncall/known-issues.json --chat <oc_...> --base-url https://<gateway> --model <router model id> >> $HOME/ticket-digest.log 2>&1
+```
+
 ## 每小时健康检查
 
 在你平时用的**另一个** DSH profile 里（服务挂了它也要能跑），让智能体按这个提示词建一个每小时的定时任务，填上仓库路径：
