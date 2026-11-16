@@ -346,7 +346,7 @@ it.each([
   expect(requests).toHaveLength(0)
 })
 /** A db environment whose kubectl stub listens on the forwarded port and whose mysql stub answers by statement. */
-function dbConfig(readOnly = '1') {
+function dbConfig(readOnly = '1', grants = ['GRANT USAGE ON *.* TO `reader`@`%`', 'GRANT SELECT, SHOW VIEW ON `app`.* TO `reader`@`%`']) {
   const kubectl = join(root, 'bin', 'kubectl-forward')
   writeFileSync(kubectl, `#!/usr/bin/env python3
 import socket, sys, json
@@ -362,12 +362,13 @@ args = sys.argv[1:]; sql = args[args.index('-e') + 1]
 cnf = [a for a in args if a.startswith('--defaults-extra-file=')][0].split('=', 1)[1]
 with open(${JSON.stringify(join(root, 'mysql.log'))}, 'a') as log: log.write(json.dumps({'sql': sql, 'args': args, 'cnf': open(cnf).read()}) + '\\n')
 if 'read_only' in sql: print('ro'); print(${JSON.stringify(readOnly)})
+elif sql.startswith('SHOW GRANTS FOR CURRENT_USER()'): print('Grants for reader@%'); [print(line) for line in ${JSON.stringify(grants)}]
 else: print('org_id\\tapi_key\\temail\\tnote'); print('org-1\\tsk-live-1\\ta@b.c\\tline\\\\tone'); print('org-2\\tNULL\\tNULL\\tx')
 `, { mode: 0o755 })
   config('prod', ['KUBECONFIG=/tmp/kubeconfig', 'KUBE_CONTEXT=prod-ctx', 'KUBE_NAMESPACE=apps', `KUBECTL=${kubectl}`, `MYSQL=${mysql}`,
     'DB_READ_HOST=10.0.0.5', 'DB_NAME=app', 'DB_USER=reader', `DB_PASSWORD=${SECRET_KEY}`, 'DB_PROXY_NAMESPACE=oncall', 'DB_PROXY_POD=db-proxy'])
 }
-it('runs one SELECT through the proxy port-forward in a read-only session after checking read_only, and hides credential columns', async () => {
+it('runs one SELECT through the proxy port-forward in a read-only session after checking read_only and the grants, and hides credential columns', async () => {
   dbConfig()
   const result = await run(['db', '--env', 'prod', '--query', 'SELECT org_id, api_key, email, note FROM t WHERE x = 1 LIMIT 20'])
   expect(result.code, result.stderr).toBe(0)
@@ -378,10 +379,11 @@ it('runs one SELECT through the proxy port-forward in a read-only session after 
   expect(forward.slice(0, 7)).toEqual(['--kubeconfig', '/tmp/kubeconfig', '--context', 'prod-ctx', '-n', 'oncall', 'port-forward'])
   expect(forward[7]).toBe('pod/db-proxy')
   const calls = readFileSync(join(root, 'mysql.log'), 'utf8').trim().split('\n').map(line => JSON.parse(line) as { sql: string; args: string[]; cnf: string })
-  expect(calls.map(call => call.sql)).toEqual(['SELECT @@global.read_only AS ro', 'SELECT org_id, api_key, email, note FROM t WHERE x = 1 LIMIT 20'])
-  expect(calls[1]!.args).toContain('--init-command=SET SESSION TRANSACTION READ ONLY; SET SESSION MAX_EXECUTION_TIME=10000')
-  expect(calls[1]!.args.join(' ')).not.toContain(SECRET_KEY)
-  expect(calls[1]!.cnf).toContain(SECRET_KEY)
+  expect(calls.map(call => call.sql)).toEqual(['SELECT @@global.read_only AS ro', 'SHOW GRANTS FOR CURRENT_USER()',
+    'SELECT org_id, api_key, email, note FROM t WHERE x = 1 LIMIT 20'])
+  expect(calls[2]!.args).toContain('--init-command=SET SESSION TRANSACTION READ ONLY; SET SESSION MAX_EXECUTION_TIME=10000')
+  expect(calls[2]!.args.join(' ')).not.toContain(SECRET_KEY)
+  expect(calls[2]!.cnf).toContain(SECRET_KEY)
   expect(result.stdout + result.stderr).not.toContain(SECRET_KEY)
 })
 it('does not hide columns of a metadata statement such as EXPLAIN', async () => {
@@ -395,6 +397,18 @@ it('runs nothing when the instance behind the proxy is not read-only', async () 
   const result = await run(['db', '--env', 'prod', '--query', 'SHOW TABLES'])
   expect(result).toMatchObject({ code: 2, stderr: expect.stringContaining('is not read-only') })
   expect(readFileSync(join(root, 'mysql.log'), 'utf8').trim().split('\n')).toHaveLength(1)
+})
+it.each([
+  [['GRANT USAGE ON *.* TO `app`@`%`', 'GRANT ALL PRIVILEGES ON `app`.* TO `app`@`%`'], 'ALL PRIVILEGES'],
+  [['GRANT SELECT, INSERT, UPDATE ON `app`.* TO `r`@`%`'], 'INSERT, UPDATE'],
+  [['GRANT SELECT (id), UPDATE (name) ON `app`.`t` TO `r`@`%`'], 'UPDATE'],
+  [['GRANT `admin_role`@`%` TO `r`@`%`'], 'GRANT `admin_role`@`%`'],
+  [[], 'no grants listed'],
+])('runs nothing when the account may do more than read: %j', async (grants, named) => {
+  dbConfig('1', grants)
+  const result = await run(['db', '--env', 'prod', '--query', 'SHOW TABLES'])
+  expect(result).toMatchObject({ code: 2, stderr: expect.stringContaining(`may do more than read (${named})`) })
+  expect(readFileSync(join(root, 'mysql.log'), 'utf8').trim().split('\n')).toHaveLength(2)
 })
 it.each([
   'DELETE FROM t LIMIT 1', 'SELECT * FROM t', 'SELECT * FROM t LIMIT 500', 'SELECT 1 LIMIT 1; DROP TABLE t',
