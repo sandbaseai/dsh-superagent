@@ -122,6 +122,14 @@ lark-bot api GET /open-apis/im/v1/messages \
   用这个 token 写一份只给它用的 kubeconfig，然后检查：`kubectl --kubeconfig <它> auth can-i delete pods -n <ns>` 应该是 `no`。
   **警告**：给智能体前务必用 `kubectl auth can-i` 核对；能删 Pod、exec、改 Deployment 或读 Secret 的凭据不能用。
 - **Grafana**（可选，读看板）：同上面 Viewer 的 service account。
+- **MySQL**（给 `dsh-oncall db`，可选）：不要复用应用的数据库账号，它通常有 `ALL PRIVILEGES`，`db` 会拒绝。由 DBA 在**主实例**上建一个只读账号，它会同步到只读实例：
+
+  ```sql
+  CREATE USER 'dsh_oncall_ro'@'%' IDENTIFIED BY '<随机密码>';
+  GRANT SELECT, SHOW VIEW ON `<库名>`.* TO 'dsh_oncall_ro'@'%';
+  ```
+
+  把 `'%'` 换成代理 Pod 出口的网段更好。账号名和密码写进 env 文件的 `DB_USER`、`DB_PASSWORD`。
 - 不要给数据库、缓存、镜像仓库管理员或任何写权限的凭据。
 
 ## `~/.config/dsh-oncall/<env>.env`
@@ -155,7 +163,7 @@ chmod 600 ~/.config/dsh-oncall/prod-a.env
 dsh-oncall envs
 ```
 
-`dsh-oncall envs` 列出环境名、可用工具（`cls`、`monitor`、`prom`、`kube`、`grafana`），以及帮 worker 判断告警属于哪个环境的信息：`DESCRIPTION`、CLS 和云监控的地域、`CLS_TOPICS` 里的主题名（不含主题 id）、kube 命名空间；凭据、主题 id 和地址都不输出。环境名不直观时，在 `DESCRIPTION` 里写清它对应的地域、Prometheus 组或服务；`prom` 在 `PROM_URL`+`PROM_TOKEN` 或 `GRAFANA_BASE_URL`+`GRAFANA_TOKEN`+`GRAFANA_PROM_UID` 齐全时才列出。`CLS_ENDPOINT`、`MONITOR_ENDPOINT` 必须是带 `https://` 的地址（只写主机名会被拒绝）。`GRAFANA_BASE_URL`、`PROM_URL` 和它们一样，只有 `127.0.0.1`、`localhost` 能用 `http://`，其他地址必须用 `https://`。`kube` 拒绝会读写本地文件的参数，比如 `-o go-template-file=…`、`--template`、`--profile-output`、`--cache-dir`；模板请直接写在 `-o go-template=…` 或 `-o jsonpath=…` 里。DSH 会从 worker 的 shell 里去掉名字含 KEY、SECRET、TOKEN、PASSWORD 的环境变量，所以凭据只能放文件里。`db` 需要 env 文件里的 `MYSQL` 写成 mysql 客户端的绝对路径，例如 `MYSQL=/usr/bin/mysql`，和 `KUBECTL` 一样：worker 的 shell 里 `mysql` 被拦截命令屏蔽了。`db` 经集群里一个只转发到只读实例的 Pod（`kubectl port-forward`，ServiceAccount 只能转发到这一个 Pod），用 `DB_READ_HOST`、`DB_USER`、`DB_PASSWORD` 连 MySQL 只读实例：连上后先确认 `@@read_only` 为 1，否则什么都不执行；只允许一条 SELECT/WITH（必须以 `LIMIT n` 结尾，n 最多 200）或 SHOW、EXPLAIN、DESCRIBE，会话设为只读事务、单条最多 10 秒；密码、Key、邮箱、电话类列的值换成 `<hidden>`。`cdb` 用 `monitor` 的同一组只读凭据，只允许 `DescribeDBInstances` 和 `DescribeSlowLogData`（最多 24 小时、每页最多 100 条），输出会把 SQL 里的字面量换成 `?`，去掉客户端地址和用户名，并附上按总耗时排序的语句汇总；`monitor` 只允许 `GetMonitorData`（最多 24 小时、`Period` 至少 60 秒）、`DescribeAlarmHistories`（最多 7 天、每页最多 100 条）、`DescribeBaseMetrics`、`DescribeAlarmPolicies`；`prom range` 最多 7 天（步长会自动加大，每条序列保持约 1100 个点），`series`、`labels`、`label-values` 最多 6 小时。`dsh-oncall` 也认 `DSH_ONCALL_CONFIG_DIR`，但 DSH 0.2.1-rc.3 不把它传给 worker 的 shell（本地验证时确认），所以服务账号的 `~/.config/dsh-oncall` 是 worker 唯一能用的位置。
+`dsh-oncall envs` 列出环境名、可用工具（`cls`、`monitor`、`prom`、`kube`、`grafana`），以及帮 worker 判断告警属于哪个环境的信息：`DESCRIPTION`、CLS 和云监控的地域、`CLS_TOPICS` 里的主题名（不含主题 id）、kube 命名空间；凭据、主题 id 和地址都不输出。环境名不直观时，在 `DESCRIPTION` 里写清它对应的地域、Prometheus 组或服务；`prom` 在 `PROM_URL`+`PROM_TOKEN` 或 `GRAFANA_BASE_URL`+`GRAFANA_TOKEN`+`GRAFANA_PROM_UID` 齐全时才列出。`CLS_ENDPOINT`、`MONITOR_ENDPOINT` 必须是带 `https://` 的地址（只写主机名会被拒绝）。`GRAFANA_BASE_URL`、`PROM_URL` 和它们一样，只有 `127.0.0.1`、`localhost` 能用 `http://`，其他地址必须用 `https://`。`kube` 拒绝会读写本地文件的参数，比如 `-o go-template-file=…`、`--template`、`--profile-output`、`--cache-dir`；模板请直接写在 `-o go-template=…` 或 `-o jsonpath=…` 里。DSH 会从 worker 的 shell 里去掉名字含 KEY、SECRET、TOKEN、PASSWORD 的环境变量，所以凭据只能放文件里。`db` 需要 env 文件里的 `MYSQL` 写成 mysql 客户端的绝对路径，例如 `MYSQL=/usr/bin/mysql`，和 `KUBECTL` 一样：worker 的 shell 里 `mysql` 被拦截命令屏蔽了。`db` 经集群里一个只转发到只读实例的 Pod（`kubectl port-forward`，ServiceAccount 只能转发到这一个 Pod），用 `DB_READ_HOST`、`DB_USER`、`DB_PASSWORD` 连 MySQL 只读实例：连上后先确认 `@@read_only` 为 1，再确认 `DB_USER` 只有 SELECT、SHOW VIEW 这类读权限（`SHOW GRANTS`），任一项不满足都什么也不执行；只允许一条 SELECT/WITH（必须以 `LIMIT n` 结尾，n 最多 200）或 SHOW、EXPLAIN、DESCRIBE，会话设为只读事务、单条最多 10 秒；密码、Key、邮箱、电话类列的值换成 `<hidden>`。`cdb` 用 `monitor` 的同一组只读凭据，只允许 `DescribeDBInstances` 和 `DescribeSlowLogData`（最多 24 小时、每页最多 100 条），输出会把 SQL 里的字面量换成 `?`，去掉客户端地址和用户名，并附上按总耗时排序的语句汇总；`monitor` 只允许 `GetMonitorData`（最多 24 小时、`Period` 至少 60 秒）、`DescribeAlarmHistories`（最多 7 天、每页最多 100 条）、`DescribeBaseMetrics`、`DescribeAlarmPolicies`；`prom range` 最多 7 天（步长会自动加大，每条序列保持约 1100 个点），`series`、`labels`、`label-values` 最多 6 小时。`dsh-oncall` 也认 `DSH_ONCALL_CONFIG_DIR`，但 DSH 0.2.1-rc.3 不把它传给 worker 的 shell（本地验证时确认），所以服务账号的 `~/.config/dsh-oncall` 是 worker 唯一能用的位置。
 
 ## 模型网关（Anthropic 兼容）
 
