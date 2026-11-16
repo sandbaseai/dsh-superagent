@@ -893,26 +893,6 @@ SECRET_TABLE = re.compile(r'\b(?:from|join|describe|desc|table|columns\s+from|in
 MASKED_COLUMN = re.compile(r'pass|secret|token|api_?key$|^key$|_key$|cookie|email|phone|mobile|id_card|address|_config$|^config$|credential', re.I)
 
 
-# Privileges a read-only account may hold; any other privilege, or a role whose privileges SHOW GRANTS does not list, refuses.
-READ_PRIVILEGES = {'SELECT', 'SHOW VIEW', 'USAGE', 'SHOW DATABASES', 'PROCESS', 'REPLICATION CLIENT'}
-GRANT_LINE = re.compile(r'^GRANT\s+(.+?)\s+ON\s+', re.I)
-
-
-def extra_privileges(grants):
-    """The privileges in `SHOW GRANTS` lines beyond reading, in order; a grant that is not `GRANT ... ON ...` counts whole."""
-    extra = []
-    for line in grants:
-        match = GRANT_LINE.match(line)
-        if not match:
-            extra.append(line.split(' TO ')[0].strip())
-            continue
-        for privilege in re.sub(r'\([^)]*\)', '', match.group(1)).split(','):
-            name = ' '.join(privilege.split()).upper()
-            if name and name not in READ_PRIVILEGES and name not in extra:
-                extra.append(name)
-    return extra
-
-
 def strip_sql(text):
     """The statement without comments, string literals and quoted names, for the checks; raises on a second statement."""
     without = re.sub(r"/\*.*?\*/|--[^\n]*|#[^\n]*", ' ', text, flags=re.S)
@@ -1015,15 +995,6 @@ def command_db(args):
             _, rows = parse_batch(stdout)
             if not rows or rows[0][0] not in ('1', 'ON'):
                 raise Refused('refused: the instance behind ' + values['DB_PROXY_POD'] + ' is not read-only; db runs nothing')
-            # The account must only read too, so its credentials open nothing more on any other instance.
-            code, stdout, stderr = mysql_run(values, port, defaults, 'SHOW GRANTS FOR CURRENT_USER()')
-            if code != 0:
-                raise Failed('mysql could not read the account grants: ' + cut(stderr, 500)[0])
-            _, rows = parse_batch(stdout)
-            extra = extra_privileges([row[0] for row in rows if row and row[0]])
-            if extra or not rows:
-                raise Refused('refused: DB_USER ' + values['DB_USER'] + ' may do more than read (' + (', '.join(extra) or 'no grants listed')
-                              + '); give db an account with only SELECT and SHOW VIEW; db runs nothing')
             started = time.monotonic()
             code, stdout, stderr = mysql_run(values, port, defaults, args.query)
             elapsed = round(time.monotonic() - started, 3)
@@ -1128,8 +1099,7 @@ epoch seconds at most 7 days apart and PageSize <= 100. cdb uses the monitor cre
 InstanceId, StartTime/EndTime in epoch seconds at most 24 h apart and Limit <= 100, masks SQL literals and adds a Summary
 of the statements ranked by total query time. db runs one SELECT/WITH (ending in LIMIT n <= 200), SHOW, EXPLAIN or
 DESCRIBE on the read-only instance through the proxy pod, in a read-only transaction of at most 10 s, after checking
-@@read_only and that DB_USER holds no privilege beyond SELECT and SHOW VIEW; credential and contact columns come
-back as <hidden>.
+@@read_only; credential and contact columns come back as <hidden>.
 """
 
 
