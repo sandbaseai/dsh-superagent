@@ -138,7 +138,7 @@ Trigger and Thread `meta` belong to the Source. The core does not interpret them
 `src/policy.ts` defines settings schemas, authorization and assessment rules. `settingsPolicy(settings, scope)` returns a fresh, stateless `Policy` on each use:
 
 - `version`, `paused` and `evalTimeoutMs` describe its current state.
-- `gate(trigger, thread, tickets)` returns admission strength and basis.
+- `gate(trigger, thread, tickets)` returns admission strength and basis; a listed bot's message first passes its Source's `screen` (`SourceScope.screen`).
 - `revalidate(mandate)` checks whether an existing Mandate still holds.
 - `admitsInferred(rules)` permits proactive acceptance only in auto mode with enabled matching rules.
 
@@ -182,7 +182,7 @@ Each kind has a health entry under its name. It reports an error once one of its
 
 ### Sources
 
-Sources extend the host through `SourceKind`, defined in `src/sources/kind.ts`. A kind declares its identity, title, description, configuration `schema` and `fields`, derived `facts`, and `health` entries. Optional behavior includes `scope`, a `channel` (`allowed`, `send`, `link`), `threadContext`, `find`, `policy`, `environment` and `refreshLabels`.
+Sources extend the host through `SourceKind`, defined in `src/sources/kind.ts`. A kind declares its identity, title, description, configuration `schema` and `fields`, derived `facts`, and `health` entries. Optional behavior includes `scope`, `screen`, a `channel` (`allowed`, `send`, `link`), `threadContext`, `find`, `policy`, `environment` and `refreshLabels`. `screen` sets a listed bot's message aside before assessment with the kind's own reason code; the Feishu kind sets aside an alert's recovery (`alert_recovered`) and its repeat while a Ticket on its alert Thread is live (`alert_repeat`), so the Policy reads no Source's `meta`.
 
 `SourceRegistry` (`registry.ts`) owns registered kinds and stored instances, and implements the Engine's `SourceScope`. Registration claims health entries on `HealthBoard`; duplicate claims and reserved `sync:` names are refused. A SourceContext writes only through its registration's claimed entries, so reports after unregistration do nothing.
 
@@ -369,7 +369,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/github-read.ts` | CI snapshots, repository reads, the `github/` resources, and `githubThreadContext`: an Issue's or pull request's conversation by page |
 | `src/sources/feishu.ts` | The Feishu kind and plugin entry, exported as `./feishu-watch` |
 | `src/sources/feishu-trigger.ts` | Feishu messages as Triggers, by one rule for live events, history pages and topic pages |
-| `src/sources/feishu-alert.ts` | Alert notices of monitoring bots (Tencent Cloud Observability cards, CLS text, a site's fallback page) parsed into a kind, status, policy and object, and the alert Thread that groups one policy and object |
+| `src/sources/feishu-alert.ts` | Alert notices of monitoring bots (Tencent Cloud Observability cards, CLS text, a site's fallback page) parsed into a kind, status, policy and object, the alert Thread that groups one policy and object, `screenAlert`, and `looksLikeAlert`, by which the `alerts` health entry reports bot messages shaped like alerts that did not parse |
 | `src/sources/feishu-repeat.ts` | Repeat notices: a firing alarm that a completed ticket on its alert Thread analysed within `repeatWindowHours` gets a reply with that conclusion and a link to the analysis, at most once per `repeatNoticeMinutes` on the Thread |
 | `src/sources/feishu-loops.ts` | The Feishu loops: the event consumer, history recovery, chat names and polling of subscribed topics |
 | `src/sources/feishu-channel.ts` | The Feishu Channel: topic replies, with `[[chart:<name>.png]]` lines sent as image replies from the ticket directory, `sent` or `gone` |

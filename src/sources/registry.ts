@@ -1,5 +1,5 @@
 /** Registry of installed Source kinds, their configured instances, and the Engine's SourceScope implementation. */
-import type { ChannelRef, OutboundMessage, ScopeResult, SourceScope, Trigger } from '../core/index.ts'
+import type { ChannelRef, OutboundMessage, ScopeResult, SourceScope, Ticket, Trigger } from '../core/index.ts'
 import type { Commands } from '../infra/commands.ts'
 import { HealthBoard, type HealthEntry } from '../infra/health.ts'
 import { AdmissionTableSchema, type Settings } from '../policy.ts'
@@ -129,6 +129,13 @@ export class SourceRegistry implements SourceScope {
     const instance = this.resolve(kind, stored)
     if (!instance.enabled) return { listened: false, reason: 'source_disabled' }
     return kind.scope ? kind.scope({ meta: input.meta }, instance.config) : { listened: true, observed: false }
+  }
+  /** The reason code when the Trigger's kind sets it aside before assessment; nothing for an uninstalled or disabled kind. */
+  screen(trigger: Trigger, tickets: Ticket[], settings = this.settings()): string | undefined {
+    const kind = this.kinds.get(trigger.source)
+    if (!kind?.screen) return undefined
+    const instance = this.resolve(kind, settings.sources[kind.kind])
+    return instance.enabled ? kind.screen(trigger, tickets, instance.config) : undefined
   }
   /** Falls back to schema defaults and disables the instance when stored configuration fails validation. */
   private resolve(kind: SourceKind, stored: { enabled: boolean; config: Record<string, unknown> } | undefined): SourceInstance {

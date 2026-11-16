@@ -2,6 +2,10 @@
 import { describe, expect, it } from 'vitest'
 import { feishuTrigger, historyEvent, parseAlert, type FeishuAlert } from '../src/sources/feishu.ts'
 import { historyText, type HistoricalMessage } from '../src/sources/feishu-trigger.ts'
+import { looksLikeAlert, screenAlert } from '../src/sources/feishu-alert.ts'
+import { countAlert, UNPARSED_ALERTS } from '../src/sources/feishu-loops.ts'
+import type { Health, SourceContext } from '../src/sources/host.ts'
+import type { Ticket } from '../src/core/index.ts'
 import { clsAlert, clsRecovery } from './fixtures/cls-alert.ts'
 import { ALERT_CHAT, fallback404, fallbackError, mysqlOngoing, mysqlRecovered, qpsFiring, qpsOngoing, qpsRecovered, ttftOpus,
   ttftSonnet } from './fixtures/tencent-alerts.ts'
@@ -87,5 +91,40 @@ describe('an alert Trigger', () => {
     const result = trigger(human)
     expect(result.threads).toEqual([{ source: 'feishu', id: `${ALERT_CHAT}:om_human` }])
     expect(result.meta).not.toHaveProperty('alert')
+  })
+})
+
+describe('screenAlert', () => {
+  const notice = (status: 'firing' | 'recovered') => ({ ...trigger(qpsFiring), meta: { alert: { status } } })
+  it('sets aside a recovery, and a repeat while a ticket on its Thread is live, and nothing else', () => {
+    expect(screenAlert(notice('recovered'), [])).toBe('alert_recovered')
+    expect(screenAlert(notice('firing'), [{ id: 'live' } as Ticket])).toBe('alert_repeat')
+    expect(screenAlert(notice('firing'), [{ id: 'done', ended: { at: '', by: 'executor', reason: 'x', outcome: 'completed' } } as Ticket]))
+      .toBeUndefined()
+    expect(screenAlert({ ...notice('firing'), meta: {} }, [{ id: 'live' } as Ticket])).toBeUndefined()
+  })
+})
+
+describe('countAlert', () => {
+  const context = () => { const reports: [string, Health][] = []; return { reports, ctx: { report: (entry: string, health: Health) => reports.push([entry, health]) } as unknown as SourceContext } }
+  const changed = { ...trigger(qpsFiring), meta: {}, text: '🟥腾讯云可观测平台告警\n新格式\n告警名称: X' }
+  it('reports an error after three alert-shaped bot messages in a row that did not parse, and clears it on the next parsed one', () => {
+    expect(looksLikeAlert(changed.text)).toBe(true)
+    const { reports, ctx } = context()
+    for (let i = 1; i < UNPARSED_ALERTS; i++) countAlert(ctx, changed)
+    expect(reports).toEqual([])
+    countAlert(ctx, changed)
+    expect(reports).toEqual([['alerts', expect.objectContaining({ state: 'error', code: 'alertsUnparsed', values: { count: '3', text: '🟥腾讯云可观测平台告警' } })]])
+    countAlert(ctx, trigger(qpsFiring))
+    expect(reports.at(-1)).toEqual(['alerts', expect.objectContaining({ state: 'ready', code: 'alertsParsed' })])
+  })
+  it('ignores people and bot messages that do not look like alerts', () => {
+    const { reports, ctx } = context()
+    for (let i = 0; i < 5; i++) {
+      countAlert(ctx, { ...changed, human: true })
+      countAlert(ctx, { ...changed, text: '日报：今天一切正常' })
+    }
+    expect(reports).toEqual([])
+    expect(looksLikeAlert('日报：今天一切正常')).toBe(false)
   })
 })

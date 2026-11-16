@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { FeishuBotSchema } from '../deployment.ts'
 import { feishuLink, sendFeishu } from './feishu-channel.ts'
 import { feishuThreadContext } from './feishu-read.ts'
+import { screenAlert } from './feishu-alert.ts'
 import { refreshChatNames, runFeishu } from './feishu-loops.ts'
 import { SOURCE, feishuTriggerId } from './feishu-trigger.ts'
 import { sourceContext } from './host.ts'
@@ -59,7 +60,8 @@ export const feishuKind: SourceKind<FeishuConfig> = {
     { key: 'linkTimeoutMs', type: 'number', advanced: true, min: 1, max: 90000, label: { zh: '原消息链接的查询时限 / 毫秒', en: 'Original message link time limit / ms' },
       hint: { zh: '查询原消息链接最多等待的时间；超时后智能体改为直接读取原消息。', en: 'How long to wait for an original message\'s link; after that, agents read the message itself.' } },
   ],
-  health: ['feishu', 'history'],
+  health: ['feishu', 'history', 'alerts'],
+  screen: (trigger, tickets) => screenAlert(trigger, tickets),
   scope({ meta }, config) {
     if (meta.direct === true) return config.directMessages ? { listened: true, observed: false, row: 'direct' } : { listened: false, reason: 'direct_messages_not_allowed' }
     const chat = config.chats.find(item => item.chatId === meta.chatId)

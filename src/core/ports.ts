@@ -11,6 +11,8 @@ export type ScopeResult = { listened: true; observed: boolean; row?: string } | 
 /** Source configuration as the domain sees it: listening scope per trigger or per recorded Mandate basis. */
 export interface SourceScope {
   scope(input: { source: string; meta: Record<string, unknown> }): ScopeResult
+  /** The reason code when the Trigger's Source sets a listed bot's message aside before assessment, given the Tickets on its Thread. */
+  screen?(trigger: Trigger, tickets: Ticket[]): string | undefined
 }
 
 /** Versioned rules; `gate` decides who may originate work. Source scope is not part of Policy. */

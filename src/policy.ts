@@ -6,7 +6,7 @@ import { LIMITS } from './limits.ts'
 import { z } from 'zod'
 import { ADMISSION_DEFAULTS, type Admission, type AdmissionCell, type AdmissionRow } from './admission.ts'
 import { key, type AssessmentOutcome, type Mandate, type Policy, type PolicyEffect, type SourceScope, type Strength, type Thread, type Ticket,
-  type Trigger, type ActorRef, type GateResult, liveTicket } from './core/index.ts'
+  type Trigger, type ActorRef, type GateResult } from './core/index.ts'
 import { sameName } from './infra/text.ts'
 import { WORKER_COMMANDS } from './infra/environment.ts'
 
@@ -179,12 +179,8 @@ export function settingsPolicy(settings: Settings, sources: SourceScope): Policy
     const addressed = trigger.addressed ? { addressed: trigger.addressed } : {}
     if (bot) {
       if (mode === 'off') return { admissible: false, reason: 'admission_ignored' }
-      // An alert's recovery notice, and a repeat while a ticket on its alert Thread is open, need no assessment.
-      const alert = trigger.meta.alert
-      if (alert && typeof alert === 'object' && typeof (alert as { status?: unknown }).status === 'string') {
-        if ((alert as { status: string }).status === 'recovered') return { admissible: false, reason: 'alert_recovered' }
-        if (tickets.some(liveTicket)) return { admissible: false, reason: 'alert_repeat' }
-      }
+      const screened = sources.screen?.(trigger, tickets)
+      if (screened) return { admissible: false, reason: screened }
       const basis = { ...recorded, via: 'bot' as const, sender: senderName(bot), ...addressed, observation: { mode } }
       return { admissible: true, strength: 'inferred', basis }
     }

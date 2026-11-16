@@ -751,6 +751,8 @@ const TEXT = {
   'healthCode.githubUnset': ['GitHub 来源没有设置仓库和智能体 CLI，GitHub 未启用', HEALTH_TEXT.githubUnset],
   'healthCode.feishuBotMissing': ['等待飞书机器人', HEALTH_TEXT.feishuBotMissing],
   'healthCode.pollFailures': ['连续 {count} 次轮询失败，最近一次：{error}', HEALTH_TEXT.pollFailures],
+  'healthCode.alertsParsed': ['告警通知能正常识别', HEALTH_TEXT.alertsParsed],
+  'healthCode.alertsUnparsed': ['连续 {count} 条机器人消息像告警但解析不出，告警格式可能变了。最近一条：{text}', HEALTH_TEXT.alertsUnparsed],
 } as const satisfies Record<string, readonly [string, string]>
 export type DshSuperagentKey = keyof typeof TEXT
 const language = (index: 0 | 1) => Object.fromEntries(Object.entries(TEXT).map(([key, pair]) => [key, pair[index]])) as Record<DshSuperagentKey, string>
