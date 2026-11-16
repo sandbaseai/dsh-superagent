@@ -372,7 +372,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/feishu-alert.ts` | Alert notices of monitoring bots (Tencent Cloud Observability cards, CLS text, a site's fallback page) parsed into a kind, status, policy and object, and the alert Thread that groups one policy and object |
 | `src/sources/feishu-repeat.ts` | Repeat notices: a firing alarm that a completed ticket on its alert Thread analysed within `repeatWindowHours` gets a reply with that conclusion and a link to the analysis, at most once per `repeatNoticeMinutes` on the Thread |
 | `src/sources/feishu-loops.ts` | The Feishu loops: the event consumer, history recovery, chat names and polling of subscribed topics |
-| `src/sources/feishu-channel.ts` | The Feishu Channel: topic replies, `sent` or `gone` |
+| `src/sources/feishu-channel.ts` | The Feishu Channel: topic replies, with `[[chart:<name>.png]]` lines sent as image replies from the ticket directory, `sent` or `gone` |
 | `src/sources/feishu-read.ts` | The `feishu/` reads of a Trigger's message, its root, parent and topic, and `feishuThreadContext`, which gives them to assessments with their images |
 | `src/sources/admission-context.ts` | The bounded window an assessment starts from: the first pages of a Trigger's Thread, read through its kind, and the messages around the Trigger |
 | `src/sources/feishu-image.ts` | Reads a Feishu message's image as an attachment for the assessing Session |
@@ -444,6 +444,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/oncall.spec.ts` | `scripts/dsh-oncall`: the config file checks, the kubectl read policy against a stub `kubectl`, the CLS SearchLog, Cloud Monitor and TencentDB signatures, action and range limits and SQL masking, the db read-only checks against stub kubectl and mysql, the Prometheus read endpoints, auth and range caps, and the Grafana allow list against local servers |
 | `tests/oncall-digest.spec.ts` | `scripts/oncall-digest`: the order and filters of the changes it lists against a stub `dsh-oncall prom`, what it sends through a stub lark-cli, and the config checks |
 | `tests/oncall-ticket-digest.spec.ts` | `scripts/oncall-ticket-digest`: the tickets of the window from a temporary database, the prompt and key sent to a stub gateway, the digest sent through a stub lark-cli, and the known-issues list it keeps (counts, quiet, dropped) |
+| `tests/feishu-charts.spec.ts` | Chart lines in a Feishu reply: taken out of the text, at most three, and sent as image replies only for PNGs directly in the ticket directory |
 | `tests/oncall-kit.spec.ts` | The Feishu CLS on-call kit in `examples/feishu-cls-oncall`: its settings against the settings schemas, its prompts against prompt validation, its profile patch as DeepSeek Harness reads it, and `scripts/oncall-apply` against a fake Management API |
 | `tests/client.spec.tsx`, `tests/navigation.spec.ts`, `tests/controls.spec.tsx` | The client plugin's registration and polling, Session navigation and route memory, the local controls, and the panel's imports, which have no cycle |
 | `tests/panel-overview.spec.tsx`, `panel-source.spec.tsx`, `panel-trigger.spec.tsx`, `panel-eval.spec.tsx`, `panel-execution.spec.tsx` | Each page of the panel, against a fake management API answered by route |

@@ -88,6 +88,27 @@ it('lists environments with their tool groups and no values', async () => {
     { name: 'test', tools: ['grafana'] }])
   for (const secret of [SECRET_ID, SECRET_KEY, GRAFANA_TOKEN, 'grafana.example']) expect(result.stdout + result.stderr).not.toContain(secret)
 })
+it('draws a range answer into a PNG in the current directory through CHART_PYTHON, and refuses a path as --out', async () => {
+  const python = join(root, 'bin', 'chart-python')
+  // The stub stands in for a Python with matplotlib: it records its arguments and stdin, and writes a PNG header.
+  writeFileSync(python, `#!/bin/sh\nprintf '%s\\n' "$@" > ${JSON.stringify(join(root, 'chart-args'))}\ncat > ${JSON.stringify(join(root, 'chart-stdin'))}\n`
+    + `out=""; while [ $# -gt 0 ]; do [ "$1" = --out ] && out="$2"; shift; done\nprintf '\\211PNG\\r\\n\\032\\n' > "$out"\n`, { mode: 0o755 })
+  config('prod', [`PROM_URL=${await serve({ status: 'success', data: { resultType: 'matrix', result: [{ metric: { provider: 'a' }, values: [[1, '2']] }] } })}`,
+    `PROM_TOKEN=${PROM_TOKEN}`, `CHART_PYTHON=${python}`])
+  const cwd = join(root, 'ticket'); mkdirSync(cwd)
+  const result = await new Promise<{ code: number; stdout: string }>(resolve => execFile('python3', [SCRIPT, 'prom', '--env', 'prod', 'chart', '--query', 'up',
+    '--title', '首字 P95', '--out', 'ttft.png', '--label', 'provider', '--from', '-24h'],
+  { cwd, env: { ...process.env, DSH_ONCALL_CONFIG_DIR: join(root, 'config') }, timeout: 20_000 },
+  (error, stdout) => resolve({ code: typeof error?.code === 'number' ? error.code : 0, stdout })))
+  expect(result.code).toBe(0)
+  expect(JSON.parse(result.stdout)).toEqual({ chart: 'ttft.png', series: 1, step: 79, reply: '[[chart:ttft.png]]' })
+  expect(existsSync(join(cwd, 'ttft.png'))).toBe(true)
+  expect(readFileSync(join(root, 'chart-args'), 'utf8')).toContain('首字 P95')
+  expect(JSON.parse(readFileSync(join(root, 'chart-stdin'), 'utf8'))).toEqual([{ metric: { provider: 'a' }, values: [[1, '2']] }])
+  for (const out of ['../x.png', '/tmp/x.png', 'X.png', 'chart.svg']) {
+    expect(await run(['prom', '--env', 'prod', 'chart', '--query', 'up', '--title', 't', '--out', out])).toMatchObject({ code: 2 })
+  }
+})
 it('prints the known-issues list the ticket digest keeps, or says there is none yet', async () => {
   expect(await run(['known'])).toMatchObject({ code: 0, stdout: expect.stringContaining('No known-issues list yet') })
   writeFileSync(join(root, 'config', 'known-issues.md'), '# 已知问题\n- **provider-a 计费停用**\n')
@@ -363,6 +384,12 @@ it('runs one SELECT through the proxy port-forward in a read-only session after 
   expect(calls[1]!.cnf).toContain(SECRET_KEY)
   expect(result.stdout + result.stderr).not.toContain(SECRET_KEY)
 })
+it('does not hide columns of a metadata statement such as EXPLAIN', async () => {
+  dbConfig()
+  const output = JSON.parse((await run(['db', '--env', 'prod', '--query', 'EXPLAIN SELECT 1 FROM t LIMIT 1'])).stdout)
+  expect(output.rows[0]).toEqual(['org-1', 'sk-live-1', 'a@b.c', 'line\tone'])
+  expect(output).not.toHaveProperty('maskedColumns')
+})
 it('runs nothing when the instance behind the proxy is not read-only', async () => {
   dbConfig('0')
   const result = await run(['db', '--env', 'prod', '--query', 'SHOW TABLES'])
@@ -372,7 +399,8 @@ it('runs nothing when the instance behind the proxy is not read-only', async () 
 it.each([
   'DELETE FROM t LIMIT 1', 'SELECT * FROM t', 'SELECT * FROM t LIMIT 500', 'SELECT 1 LIMIT 1; DROP TABLE t',
   "SELECT * FROM t INTO OUTFILE '/tmp/x' LIMIT 1", 'SELECT * FROM t FOR UPDATE LIMIT 1', 'SELECT SLEEP(100) LIMIT 1',
-  'WITH a AS (SELECT 1) SELECT * FROM a', 'SET @x = 1', '/* SELECT */ UPDATE t SET a = 1 LIMIT 1', 'x'.repeat(4001),
+  'WITH a AS (SELECT 1) SELECT * FROM a', 'SET @x = 1', 'SELECT id FROM provider_credentials LIMIT 1', 'SELECT * FROM agents_secrets LIMIT 1',
+  'DESCRIBE api_keys', 'SELECT id FROM `user_password_credentials` LIMIT 1', 'SELECT p.id FROM t JOIN sandbase.oauth_tokens p LIMIT 1', '/* SELECT */ UPDATE t SET a = 1 LIMIT 1', 'x'.repeat(4001),
 ])('refuses db %s before connecting', async query => {
   dbConfig()
   expect(await run(['db', '--env', 'prod', '--query', query])).toMatchObject({ code: 2, stderr: expect.stringMatching(/^refused:/) })

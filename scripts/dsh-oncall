@@ -34,7 +34,7 @@ ENV_NAME = re.compile(r'^[a-z0-9][a-z0-9-]{0,30}$')
 KNOWN_KEYS = {'DESCRIPTION', 'CLS_SECRET_ID', 'CLS_SECRET_KEY', 'CLS_REGION', 'CLS_TOPIC_ID', 'CLS_TOPICS', 'CLS_ENDPOINT', 'KUBECONFIG',
               'KUBE_CONTEXT', 'KUBE_NAMESPACE', 'KUBECTL', 'GRAFANA_BASE_URL', 'GRAFANA_TOKEN', 'MONITOR_SECRET_ID',
               'MONITOR_SECRET_KEY', 'MONITOR_REGION', 'MONITOR_ENDPOINT', 'CDB_ENDPOINT', 'DB_READ_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER',
-              'DB_PASSWORD', 'DB_PROXY_NAMESPACE', 'DB_PROXY_POD', 'MYSQL', 'PROM_URL', 'PROM_USER', 'PROM_TOKEN', 'GRAFANA_PROM_UID'}
+              'DB_PASSWORD', 'DB_PROXY_NAMESPACE', 'DB_PROXY_POD', 'MYSQL', 'CHART_PYTHON', 'PROM_URL', 'PROM_USER', 'PROM_TOKEN', 'GRAFANA_PROM_UID'}
 SECRET_KEYS = ('CLS_SECRET_ID', 'CLS_SECRET_KEY', 'GRAFANA_TOKEN', 'MONITOR_SECRET_ID', 'MONITOR_SECRET_KEY', 'PROM_TOKEN', 'DB_PASSWORD')
 GROUPS = {'cls': ('CLS_SECRET_ID', 'CLS_SECRET_KEY', 'CLS_REGION'), 'kube': ('KUBECONFIG', 'KUBE_CONTEXT', 'KUBE_NAMESPACE'),
           'grafana': ('GRAFANA_BASE_URL', 'GRAFANA_TOKEN'), 'monitor': ('MONITOR_SECRET_ID', 'MONITOR_SECRET_KEY', 'MONITOR_REGION'),
@@ -573,7 +573,7 @@ def command_cdb(args):
 
 # ---- prom ----
 
-PROM_COMMANDS = {'query': 'query', 'range': 'query_range', 'series': 'series', 'labels': 'labels', 'label-values': None,
+PROM_COMMANDS = {'query': 'query', 'range': 'query_range', 'chart': 'query_range', 'series': 'series', 'labels': 'labels', 'label-values': None,
                  'rules': 'rules', 'alerts': 'alerts'}
 LABEL = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
 MAX_QUERY = 4000
@@ -683,7 +683,30 @@ def command_prom(sub, options):
         payload['result'] = data
     if answer.get('warnings'):
         payload['warnings'] = answer['warnings']
+    if getattr(options, 'chart', None):
+        return render_chart(options, values, payload)
     emit(shrink(payload, 'result'))
+    return 0
+
+
+CHART_NAME = re.compile(r'^[a-z0-9][a-z0-9-]{0,60}\.png$')
+CHART_SCRIPT = Path(__file__).resolve().parent / 'oncall-chart'
+
+
+def render_chart(options, values, payload):
+    """Draw the range answer into `--out` in the current directory, and print the line that puts it in a reply."""
+    python = values.get('CHART_PYTHON') or str(Path.home() / '.venvs' / 'digest' / 'bin' / 'python')
+    if not os.path.exists(python):
+        raise Failed('no Python with matplotlib at ' + python + '; set CHART_PYTHON in the environment file')
+    try:
+        result = subprocess.run([python, '-I', str(CHART_SCRIPT), '--title', options.title, '--out', options.out, '--label', options.label],
+                                input=json.dumps(payload.get('result') or []), capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        raise Failed('the chart did not render within 60 seconds')
+    if result.returncode != 0:
+        raise Failed('the chart did not render: ' + cut(result.stderr.strip(), 500)[0])
+    emit({'chart': options.out, 'series': len(payload.get('result') or []), 'step': payload.get('step'),
+          'reply': '[[chart:' + options.out + ']]'})
     return 0
 
 
@@ -864,8 +887,10 @@ LIMIT = re.compile(r'\blimit\s+(\d+)(\s*,\s*(\d+))?\s*$', re.I)
 FORBIDDEN_SQL = re.compile(r'\binto\s+(outfile|dumpfile|@)|\bfor\s+update\b|\block\s+in\s+share\s+mode\b|\b(sleep|benchmark|'
                            r'load_file|get_lock|release_lock)\s*\(|\b(insert|update|delete|replace|create|alter|drop|truncate|'
                            r'grant|revoke|set|call|handler|load|lock|unlock|rename|kill|flush|purge|reset|install|uninstall)\b', re.I)
+# Tables that hold credentials: a statement naming one is refused, whatever its columns.
+SECRET_TABLE = re.compile(r'\b(?:from|join|describe|desc|table|columns\s+from|index\s+from)\s+(?:\w+\.)?(\w*(?:credential|secret|password|passwd|token|session_key|api_keys)\w*)', re.I)
 # Column names whose values are credentials or contact details; their values are replaced.
-MASKED_COLUMN = re.compile(r'pass|secret|token|api_?key$|^key$|_key$|cookie|email|phone|mobile|id_card|address', re.I)
+MASKED_COLUMN = re.compile(r'pass|secret|token|api_?key$|^key$|_key$|cookie|email|phone|mobile|id_card|address|_config$|^config$|credential', re.I)
 
 
 def strip_sql(text):
@@ -889,6 +914,11 @@ def check_sql(text):
     found = FORBIDDEN_SQL.search(plain)
     if found and not (plain.lower().startswith('show') and found.group(0).lower() == 'set'):
         raise Refused('refused: db does not run ' + found.group(0).strip() + ': it only reads')
+    # Table names are checked with their backticks removed, so quoting a name does not hide it.
+    unquoted = re.sub(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"", "''", re.sub(r"/\*.*?\*/|--[^\n]*|#[^\n]*", ' ', text, flags=re.S)).replace('`', '')
+    named = SECRET_TABLE.search(unquoted)
+    if named:
+        raise Refused('refused: db does not read the table ' + named.group(1) + ': it may hold credentials')
     if NEEDS_LIMIT.match(plain):
         limit = LIMIT.search(plain)
         rows = int(limit.group(3) or limit.group(1)) if limit else None
@@ -978,7 +1008,8 @@ def command_db(args):
         emit({'error': cut(stderr.strip(), 2000)[0], 'seconds': elapsed})
         return 1
     columns, rows = parse_batch(stdout)
-    masked = [index for index, name in enumerate(columns) if MASKED_COLUMN.search(name)]
+    # EXPLAIN, SHOW and DESCRIBE answer with metadata (an EXPLAIN's `key` is an index name), so only row reads are masked.
+    masked = [index for index, name in enumerate(columns) if MASKED_COLUMN.search(name)] if NEEDS_LIMIT.match(plain) else []
     for row in rows:
         for index in masked:
             if index < len(row) and row[index] is not None:
@@ -1055,6 +1086,7 @@ USAGE = """usage:
   dsh-oncall db --env E --query 'SELECT ... LIMIT n'
   dsh-oncall prom --env E query --query Q [--time now]
   dsh-oncall prom --env E range --query Q [--from -1h] [--to now] [--step 60]
+  dsh-oncall prom --env E chart --query Q --title T --out NAME.png [--label provider] [--from -24h] [--to now]
   dsh-oncall prom --env E series --match M [--match M ...] [--from -1h] [--to now]
   dsh-oncall prom --env E labels [--match M ...] [--from -1h] [--to now]
   dsh-oncall prom --env E label-values --label NAME [--match M ...] [--from -1h] [--to now]
@@ -1157,10 +1189,21 @@ def run(argv):
         matches = {'--match': ('match', [], str)}
         spec = {'query': {'--query': ('query', None, str), '--time': ('time', 'now', str)},
                 'range': {'--query': ('query', None, str), **window, '--step': ('step', 60, int)},
+                'chart': {'--query': ('query', None, str), **window, '--step': ('step', 60, int), '--title': ('title', None, str),
+                          '--out': ('out', None, str), '--label': ('label', '', str)},
                 'series': {**matches, **window}, 'labels': {**matches, **window},
                 'label-values': {'--label': ('label', None, str), **matches, **window}}.get(sub, {})
         options = parse_options(rest, spec)
         options.env = env
+        if sub == 'chart':
+            if not options.title or len(options.title) > 80:
+                raise Refused('refused: prom chart needs --title of at most 80 characters')
+            if not CHART_NAME.match(options.out or ''):
+                raise Refused('refused: --out must be a file name such as provider-ttft.png (lowercase, digits, dashes)')
+            if options.label and not LABEL.match(options.label):
+                raise Refused('refused: --label must match ^[a-zA-Z_][a-zA-Z0-9_]*$')
+            options.chart = True
+            sub = 'range'
         return command_prom(sub, options)
     if command == 'db':
         options = parse_options(rest, {'--query': ('query', None, str)})
