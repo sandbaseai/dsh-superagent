@@ -1,35 +1,48 @@
-/** Tests for scripts/oncall-ticket-digest against a temporary database, a stub gateway and a stub lark-cli. */
+/** Tests for scripts/oncall-ticket-digest against a fake management API, a stub gateway and a stub lark-cli. */
 import { execFile } from 'node:child_process'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { DatabaseSync } from 'node:sqlite'
 import { afterEach, beforeEach, expect, it } from 'vitest'
 
 const SCRIPT = join(import.meta.dirname, '..', 'scripts', 'oncall-ticket-digest')
 const KEY = 'gateway-key-0123456789'
-let root: string, server: Server | undefined
+let root: string, server: Server | undefined, api: Server | undefined, apiUrl: string
+let listed: string[] = []
 let seen: { headers: Record<string, unknown>; body: { model: string; messages: { content: string }[] } }[] = []
 
-const ticket = (id: string, minutesAgo: number, title: string, conclusion: string) => ({ id: `${id}${'0'.repeat(24)}`, title,
-  createdAt: new Date(Date.now() - minutesAgo * 60_000).toISOString(), ended: { outcome: 'completed' },
-  assignments: [{ id: 'a', report: { state: 'ready', at: '', summary: `**结论**: ${conclusion}\n**证据**: x` } }] })
+/** A ticket as the management API lists it: newest updated first, with the latest report's summary. */
+const ticket = (id: string, minutesAgo: number, title: string, conclusion: string) => {
+  const at = new Date(Date.now() - minutesAgo * 60_000).toISOString()
+  return { id: `${id}${'0'.repeat(24)}`, title, createdAt: at, updatedAt: at, ended: { outcome: 'completed' },
+    summary: `**结论**: ${conclusion}\n**证据**: x` }
+}
+const TICKETS = [ticket('aaaaaaaa', 30, 'p0 · provider-a 不可用', '计费停用，403'), ticket('cccccccc', 60, '404 · /old', '旧链接'),
+  ticket('bbbbbbbb', 90, 'p0 · provider-a 不可用', '计费停用，仍是 403'), ticket('dddddddd', 3000, '很早的工单', '已过期')]
 
-beforeEach(() => {
+beforeEach(async () => {
   root = mkdtempSync(join(tmpdir(), 'ticket digest '))
-  const db = new DatabaseSync(join(root, 'orchestrator.sqlite'))
-  db.exec('CREATE TABLE ticket (id TEXT PRIMARY KEY, value TEXT)')
-  const insert = db.prepare('INSERT INTO ticket VALUES (?, ?)')
-  for (const t of [ticket('aaaaaaaa', 30, 'p0 · provider-a 不可用', '计费停用，403'), ticket('bbbbbbbb', 90, 'p0 · provider-a 不可用', '计费停用，仍是 403'),
-    ticket('cccccccc', 60, '404 · /old', '旧链接'), ticket('dddddddd', 3000, '很早的工单', '已过期')]) insert.run(t.id, JSON.stringify(t))
-  db.close()
+  listed = []
+  // The management API pages the ended tickets one at a time, so the script must follow next_offset and stop at the window.
+  api = createServer((request, response) => {
+    const url = new URL(request.url!, 'http://x')
+    listed.push(`${url.pathname}?${url.searchParams}`)
+    if (request.headers['x-orchestrator-request'] !== '1') { response.writeHead(403); response.end(); return }
+    const items = url.searchParams.get('state') === 'ended' ? TICKETS : []
+    const offset = Number(url.searchParams.get('offset')), limit = 1
+    response.writeHead(200, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({ items: items.slice(offset, offset + limit), total: items.length,
+      next_offset: offset + limit < items.length ? offset + limit : null }))
+  })
+  await new Promise<void>(resolve => api!.listen(0, '127.0.0.1', resolve))
+  apiUrl = `http://127.0.0.1:${(api!.address() as AddressInfo).port}`
   writeFileSync(join(root, 'credentials.yaml'), `version: 1\nrefs:\n  ONCALL_LLM_API_KEY: "${KEY}"\n`)
   writeFileSync(join(root, 'lark'), `#!/bin/sh\necho "$@" >> ${JSON.stringify(join(root, 'sends.log'))}\ncat digest.md >> ${JSON.stringify(join(root, 'sent.md'))}\n`, { mode: 0o755 })
   seen = []
 })
-afterEach(() => { server?.close(); server = undefined; rmSync(root, { recursive: true, force: true }) })
+afterEach(() => { server?.close(); server = undefined; api?.close(); api = undefined; rmSync(root, { recursive: true, force: true }) })
 
 async function gateway(answer: unknown): Promise<string> {
   server = createServer((request, response) => {
@@ -47,7 +60,7 @@ async function gateway(answer: unknown): Promise<string> {
 function digest(base: string, ...args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
   // The script requires https; the test runs a plain-HTTP stub through an override only the test sets.
   return new Promise(resolve => execFile('python3', ['-c', `import runpy, sys, urllib.request
-sys.argv = ${JSON.stringify(['oncall-ticket-digest', '--state-dir', root, '--known', join(root, 'known.json'), '--chat', 'oc_digest',
+sys.argv = ${JSON.stringify(['oncall-ticket-digest', '--url', apiUrl, '--known', join(root, 'known.json'), '--chat', 'oc_digest',
     '--credentials', join(root, 'credentials.yaml'), '--base-url', 'https://gateway.example', '--model', 'test-model', '--lark-cli', join(root, 'lark')])} + sys.argv[1:]
 real = urllib.request.Request
 urllib.request.Request = lambda url, *a, **k: real(url.replace('https://gateway.example', ${JSON.stringify(base)}), *a, **k)
@@ -78,6 +91,8 @@ it('groups the window\'s tickets through the gateway, posts the digest and write
   expect(readFileSync(join(root, 'known.md'), 'utf8')).toContain('**provider-a 计费停用**（`provider-a-billing`，需要人处理，2 张工单')
   expect(readFileSync(join(root, 'sends.log'), 'utf8')).toBe('im +messages-send --chat-id oc_digest --markdown @digest.md --as bot\n')
   expect(result.stdout + result.stderr).not.toContain(KEY)
+  // The last page it read held the first ticket older than the window; nothing after it was read.
+  expect(listed.filter(path => path.includes('state=ended'))).toHaveLength(4)
   // The next run passes the known list to the model and adds to the same key's count.
   await digest(await gateway(answer))
   expect(seen.at(-1)!.body.messages[0]!.content).toContain('provider-a-billing')
@@ -100,9 +115,11 @@ it('marks an issue quiet after two days without tickets, drops it after a week, 
   expect(existsSync(join(root, 'sends.log'))).toBe(false)
 })
 
-it('refuses a bad chat or a missing model before reading anything', async () => {
+it('refuses a bad chat, a missing model or a non-loopback API before reading anything', async () => {
   const base = await gateway(answer)
+  expect(await digest(base, '--url', 'https://panel.example')).toMatchObject({ code: 2, stderr: expect.stringContaining('--url must be the loopback') })
   expect(await digest(base, '--chat', 'nope')).toMatchObject({ code: 2, stderr: expect.stringContaining('--chat must be') })
   expect(await digest(base, '--model', '')).toMatchObject({ code: 2, stderr: expect.stringContaining('--model are required') })
   expect(seen).toHaveLength(0)
+  expect(listed).toHaveLength(0)
 })
