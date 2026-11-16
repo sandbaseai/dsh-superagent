@@ -114,10 +114,10 @@ def collect(prom, config, now):
         # Success only where the window held enough requests: a few requests make a ratio swing between 0 and 100%.
         enough = f'(sum by ({by}) (increase({req}{{{by}=~"{names}"}}[{WINDOW}])) >= {MIN_POINT_REQUESTS})'
         data['success'] = prom.matrix(
-            f'(1 - (sum by ({by}) (rate({req}{{{by}=~"{names}",{status}="{failed}"}}[{WINDOW}])) or sum by ({by}) (rate({req}{{{by}=~"{names}"}}[{WINDOW}])) * 0)'
+            f'(1 - (sum by ({by}) (rate({req}{{{by}=~"{names}",{status}="{failed}"}}[{WINDOW}])) or sum by ({by}) (rate({req}{{{by}=~"{names}"}}[{WINDOW}])) * 0)'  # noqa: E501
             f' / sum by ({by}) (rate({req}{{{by}=~"{names}"}}[{WINDOW}]))) and {enough}', by, start, now)
         if m.get('ttft'):
-            data['ttft'] = prom.matrix(f'histogram_quantile(0.95, sum by (le, {by}) (rate({m["ttft"]}{m.get("ttftSelector", "")}[{WINDOW}]))) and {enough}', by, start, now)
+            data['ttft'] = prom.matrix(f'histogram_quantile(0.95, sum by (le, {by}) (rate({m["ttft"]}{m.get("ttftSelector", "")}[{WINDOW}]))) and {enough}', by, start, now)  # noqa: E501
     return data
 
 

@@ -96,9 +96,9 @@ def read_config(env):
     try:
         info = os.lstat(path)
     except FileNotFoundError:
-        raise Refused('refused: no configuration file ' + str(path))
+        raise Refused('refused: no configuration file ' + str(path)) from None
     except OSError as error:
-        raise Refused('refused: cannot read ' + str(path) + ' (' + type(error).__name__ + ')')
+        raise Refused('refused: cannot read ' + str(path) + ' (' + type(error).__name__ + ')') from None
     if not stat.S_ISREG(info.st_mode):
         raise Refused('refused: ' + str(path) + ' is not a regular file')
     if info.st_mode & 0o077:
@@ -108,7 +108,7 @@ def read_config(env):
     try:
         text = path.read_text(encoding='utf-8')
     except (OSError, UnicodeDecodeError) as error:
-        raise Refused('refused: cannot read ' + str(path) + ' (' + type(error).__name__ + ')')
+        raise Refused('refused: cannot read ' + str(path) + ' (' + type(error).__name__ + ')') from None
     return parse_config(text)
 
 
@@ -174,7 +174,7 @@ def request(url, data=None, headers=None, method='GET', timeout=30):
     except urllib.error.HTTPError as error:
         return error.code, error.read().decode('utf-8', 'replace')
     except (urllib.error.URLError, OSError, ValueError) as error:
-        raise Failed('request failed: ' + type(error).__name__ + ': ' + str(getattr(error, 'reason', error)))
+        raise Failed('request failed: ' + type(error).__name__ + ': ' + str(getattr(error, 'reason', error))) from None
 
 
 def parse_json(text):
@@ -257,7 +257,7 @@ def parse_time(value, now_ms):
     try:
         moment = datetime.datetime.fromisoformat(value[:-1] + '+00:00' if value.endswith('Z') else value)
     except ValueError:
-        raise Refused('refused: time ' + value + ' is not now, -Nm/-Nh/-Nd, epoch milliseconds or ISO-8601')
+        raise Refused('refused: time ' + value + ' is not now, -Nm/-Nh/-Nd, epoch milliseconds or ISO-8601') from None
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=datetime.timezone.utc)
     return int(moment.timestamp() * 1000)
@@ -439,7 +439,7 @@ def command_monitor(args):
     try:
         params = json.loads(args.params)
     except ValueError:
-        raise Refused('refused: --params must be a JSON object')
+        raise Refused('refused: --params must be a JSON object') from None
     if not isinstance(params, dict):
         raise Refused('refused: --params must be a JSON object')
     check_monitor(args.action, params)
@@ -525,7 +525,7 @@ def command_cdb(args):
     try:
         params = json.loads(args.params)
     except ValueError:
-        raise Refused('refused: --params must be a JSON object')
+        raise Refused('refused: --params must be a JSON object') from None
     if not isinstance(params, dict):
         raise Refused('refused: --params must be a JSON object')
     check_cdb(args.action, params)
@@ -702,7 +702,7 @@ def render_chart(options, values, payload):
         result = subprocess.run([python, '-I', str(CHART_SCRIPT), '--title', options.title, '--out', options.out, '--label', options.label],
                                 input=json.dumps(payload.get('result') or []), capture_output=True, text=True, timeout=60)
     except subprocess.TimeoutExpired:
-        raise Failed('the chart did not render within 60 seconds')
+        raise Failed('the chart did not render within 60 seconds') from None
     if result.returncode != 0:
         raise Failed('the chart did not render: ' + cut(result.stderr.strip(), 500)[0])
     emit({'chart': options.out, 'series': len(payload.get('result') or []), 'step': payload.get('step'),
@@ -813,7 +813,7 @@ def log_defaults(args):
         try:
             number = int(value)
         except ValueError:
-            raise Refused('refused: --tail must be a number')
+            raise Refused('refused: --tail must be a number') from None
         if args[index] == '--tail':
             del args[index + 1]
         args[index] = '--tail=' + str(2000 if number < 0 or number > 2000 else number)
@@ -854,9 +854,9 @@ def command_kube(env, args):
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
-        raise Failed('kubectl did not finish within 60 seconds')
+        raise Failed('kubectl did not finish within 60 seconds') from None
     except OSError as error:
-        raise Failed('kubectl could not run: ' + type(error).__name__)
+        raise Failed('kubectl could not run: ' + type(error).__name__) from None
     stdout = result.stdout
     if args[0] == 'logs':
         lines, cut_any = [], False
@@ -888,7 +888,7 @@ FORBIDDEN_SQL = re.compile(r'\binto\s+(outfile|dumpfile|@)|\bfor\s+update\b|\blo
                            r'load_file|get_lock|release_lock)\s*\(|\b(insert|update|delete|replace|create|alter|drop|truncate|'
                            r'grant|revoke|set|call|handler|load|lock|unlock|rename|kill|flush|purge|reset|install|uninstall)\b', re.I)
 # Tables that hold credentials: a statement naming one is refused, whatever its columns.
-SECRET_TABLE = re.compile(r'\b(?:from|join|describe|desc|table|columns\s+from|index\s+from)\s+(?:\w+\.)?(\w*(?:credential|secret|password|passwd|token|session_key|api_keys)\w*)', re.I)
+SECRET_TABLE = re.compile(r'\b(?:from|join|describe|desc|table|columns\s+from|index\s+from)\s+(?:\w+\.)?(\w*(?:credential|secret|password|passwd|token|session_key|api_keys)\w*)', re.I)  # noqa: E501
 # Column names whose values are credentials or contact details; their values are replaced.
 MASKED_COLUMN = re.compile(r'pass|secret|token|api_?key$|^key$|_key$|cookie|email|phone|mobile|id_card|address|_config$|^config$|credential', re.I)
 
@@ -953,9 +953,9 @@ def mysql_run(values, port, defaults, sql):
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=SQL_TIMEOUT_MS // 1000 + 15, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
-        raise Failed('mysql did not finish within ' + str(SQL_TIMEOUT_MS // 1000 + 15) + ' seconds')
+        raise Failed('mysql did not finish within ' + str(SQL_TIMEOUT_MS // 1000 + 15) + ' seconds') from None
     except OSError as error:
-        raise Failed('mysql could not run: ' + type(error).__name__)
+        raise Failed('mysql could not run: ' + type(error).__name__) from None
     return result.returncode, result.stdout, result.stderr
 
 
@@ -1140,7 +1140,7 @@ def parse_options(argv, spec, positional=None):
                 try:
                     value = int(value)
                 except ValueError:
-                    raise Refused('refused: ' + flag + ' takes a number')
+                    raise Refused('refused: ' + flag + ' takes a number') from None
             elif isinstance(kind, tuple) and value not in kind:
                 raise Refused('refused: ' + flag + ' takes one of ' + ', '.join(kind))
             if isinstance(default, list):

@@ -173,7 +173,7 @@ def known_markdown(known, now):
         first = parse_time(entry['firstSeen']).astimezone(SHANGHAI).strftime('%m-%d %H:%M')
         last = parse_time(entry['lastSeen']).astimezone(SHANGHAI).strftime('%m-%d %H:%M')
         tag = '安静' if entry['status'] == 'quiet' else ('需要人处理' if entry.get('needs_human') else '无需处理')
-        lines.append(f'- **{entry["title"]}**（`{entry["key"]}`，{tag}，{entry.get("tickets", 0)} 张工单，首次 {first}，最近 {last}）：{entry["cause"]} 建议：{entry["action"]}')
+        lines.append(f'- **{entry["title"]}**（`{entry["key"]}`，{tag}，{entry.get("tickets", 0)} 张工单，首次 {first}，最近 {last}）：{entry["cause"]} 建议：{entry["action"]}')  # noqa: E501
     return '\n'.join(lines) + '\n'
 
 
