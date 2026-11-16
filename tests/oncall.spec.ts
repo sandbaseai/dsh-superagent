@@ -2,7 +2,7 @@
  * Grafana servers. */
 import { execFile } from 'node:child_process'
 import { createHash, createHmac } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, readFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -317,6 +317,60 @@ it.each([
   cdbConfig(await serve({ Response: { RequestId: 'c3' } }))
   expect(await run(['cdb', '--env', 'prod', '--action', action, '--params', params])).toMatchObject({ code: 2, stderr: expect.stringMatching(/^refused:/) })
   expect(requests).toHaveLength(0)
+})
+/** A db environment whose kubectl stub listens on the forwarded port and whose mysql stub answers by statement. */
+function dbConfig(readOnly = '1') {
+  const kubectl = join(root, 'bin', 'kubectl-forward')
+  writeFileSync(kubectl, `#!/usr/bin/env python3
+import socket, sys, json
+open(${JSON.stringify(join(root, 'forward.json'))}, 'w').write(json.dumps(sys.argv[1:]))
+port = int(sys.argv[-1].split(':')[0]); s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('127.0.0.1', port)); s.listen(5)
+while True: s.accept()[0].close()
+`, { mode: 0o755 })
+  const mysql = join(root, 'bin', 'mysql-stub')
+  writeFileSync(mysql, `#!/usr/bin/env python3
+import sys, json
+args = sys.argv[1:]; sql = args[args.index('-e') + 1]
+cnf = [a for a in args if a.startswith('--defaults-extra-file=')][0].split('=', 1)[1]
+with open(${JSON.stringify(join(root, 'mysql.log'))}, 'a') as log: log.write(json.dumps({'sql': sql, 'args': args, 'cnf': open(cnf).read()}) + '\\n')
+if 'read_only' in sql: print('ro'); print(${JSON.stringify(readOnly)})
+else: print('org_id\\tapi_key\\temail\\tnote'); print('org-1\\tsk-live-1\\ta@b.c\\tline\\\\tone'); print('org-2\\tNULL\\tNULL\\tx')
+`, { mode: 0o755 })
+  config('prod', ['KUBECONFIG=/tmp/kubeconfig', 'KUBE_CONTEXT=prod-ctx', 'KUBE_NAMESPACE=apps', `KUBECTL=${kubectl}`, `MYSQL=${mysql}`,
+    'DB_READ_HOST=10.0.0.5', 'DB_NAME=app', 'DB_USER=reader', `DB_PASSWORD=${SECRET_KEY}`, 'DB_PROXY_NAMESPACE=oncall', 'DB_PROXY_POD=db-proxy'])
+}
+it('runs one SELECT through the proxy port-forward in a read-only session after checking read_only, and hides credential columns', async () => {
+  dbConfig()
+  const result = await run(['db', '--env', 'prod', '--query', 'SELECT org_id, api_key, email, note FROM t WHERE x = 1 LIMIT 20'])
+  expect(result.code, result.stderr).toBe(0)
+  const output = JSON.parse(result.stdout)
+  expect(output).toMatchObject({ columns: ['org_id', 'api_key', 'email', 'note'], rowCount: 2, maskedColumns: ['api_key', 'email'],
+    rows: [['org-1', '<hidden>', '<hidden>', 'line\tone'], ['org-2', null, null, 'x']] })
+  const forward = JSON.parse(readFileSync(join(root, 'forward.json'), 'utf8')) as string[]
+  expect(forward.slice(0, 7)).toEqual(['--kubeconfig', '/tmp/kubeconfig', '--context', 'prod-ctx', '-n', 'oncall', 'port-forward'])
+  expect(forward[7]).toBe('pod/db-proxy')
+  const calls = readFileSync(join(root, 'mysql.log'), 'utf8').trim().split('\n').map(line => JSON.parse(line) as { sql: string; args: string[]; cnf: string })
+  expect(calls.map(call => call.sql)).toEqual(['SELECT @@global.read_only AS ro', 'SELECT org_id, api_key, email, note FROM t WHERE x = 1 LIMIT 20'])
+  expect(calls[1]!.args).toContain('--init-command=SET SESSION TRANSACTION READ ONLY; SET SESSION MAX_EXECUTION_TIME=10000')
+  expect(calls[1]!.args.join(' ')).not.toContain(SECRET_KEY)
+  expect(calls[1]!.cnf).toContain(SECRET_KEY)
+  expect(result.stdout + result.stderr).not.toContain(SECRET_KEY)
+})
+it('runs nothing when the instance behind the proxy is not read-only', async () => {
+  dbConfig('0')
+  const result = await run(['db', '--env', 'prod', '--query', 'SHOW TABLES'])
+  expect(result).toMatchObject({ code: 2, stderr: expect.stringContaining('is not read-only') })
+  expect(readFileSync(join(root, 'mysql.log'), 'utf8').trim().split('\n')).toHaveLength(1)
+})
+it.each([
+  'DELETE FROM t LIMIT 1', 'SELECT * FROM t', 'SELECT * FROM t LIMIT 500', 'SELECT 1 LIMIT 1; DROP TABLE t',
+  "SELECT * FROM t INTO OUTFILE '/tmp/x' LIMIT 1", 'SELECT * FROM t FOR UPDATE LIMIT 1', 'SELECT SLEEP(100) LIMIT 1',
+  'WITH a AS (SELECT 1) SELECT * FROM a', 'SET @x = 1', '/* SELECT */ UPDATE t SET a = 1 LIMIT 1', 'x'.repeat(4001),
+])('refuses db %s before connecting', async query => {
+  dbConfig()
+  expect(await run(['db', '--env', 'prod', '--query', query])).toMatchObject({ code: 2, stderr: expect.stringMatching(/^refused:/) })
+  expect(() => readFileSync(join(root, 'forward.json'))).toThrow()
 })
 it('refuses a malformed monitor region without a request', async () => {
   monitorConfig(await serve({ Response: { RequestId: 'm4' } }))

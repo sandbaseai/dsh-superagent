@@ -62,6 +62,8 @@ Rerun the alert's own condition first to confirm the numbers, then the error cou
 
 `dsh-oncall cdb --env <env> --action DescribeSlowLogData --params '{"InstanceId":"<id>","StartTime":<epoch s>,"EndTime":<epoch s>,"Limit":100,"SortBy":"Timestamp","OrderBy":"DESC"}'` reads a TencentDB for MySQL slow log (at most 24 h, literals masked as `?`) with a `Summary` ranking the statements by total query time; `--action DescribeDBInstances` lists the instance ids. For a database alarm such as IOPS or CPU at its limit, read the slow log of that instance before guessing at the cause.
 
+`dsh-oncall db --env <env> --query '<one SELECT ... LIMIT n>'` runs one reading statement (SELECT or WITH ending in `LIMIT n`, n at most 200, or SHOW, EXPLAIN, DESCRIBE) on the environment's MySQL read-only instance, in a read-only session of at most 10 s; credential and contact columns come back as `<hidden>`. The read-only instance also serves reports, so filter on indexed columns (`SHOW INDEX FROM <table>`), keep time ranges short, and prefer one aggregate over many row reads.
+
 ## 5. Read Kubernetes
 
 Find the workload from the alert labels or log fields (service, pod, container) and read its state:
