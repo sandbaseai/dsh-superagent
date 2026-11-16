@@ -1,0 +1,257 @@
+#!/usr/bin/env python3
+"""Group the last day's on-call tickets by root cause, keep the list of known open issues, and post a digest to Feishu.
+
+It reads the dsh-superagent database read-only (ticket titles and the conclusions of their reports), asks the model
+through the Anthropic-compatible gateway to group them and to match them with the known issues, writes the updated
+list as JSON and as Markdown (which workers read with `dsh-oncall known` before investigating), and posts the digest
+with a bot-only lark-cli. It changes no system and no setting.
+
+  oncall-ticket-digest --state-dir DIR --known FILE --chat oc_... [--hours 24] [--dry-run]
+
+Exit 0 posted (or printed with --dry-run), 1 the model, the database or the post failed, 2 a bad argument.
+"""
+
+import argparse
+import datetime
+import json
+import os
+from pathlib import Path
+import re
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import urllib.error
+import urllib.request
+
+CONCLUSION_CHARS = 400
+MAX_TICKETS = 150
+# A known issue with no ticket for this long is marked quiet; one quiet this long is dropped from the list.
+QUIET_HOURS = 48
+DROP_DAYS = 7
+SHANGHAI = datetime.timezone(datetime.timedelta(hours=8))
+PROMPT = """You maintain the on-call team's list of known open issues and write their daily digest.
+
+Below are the known issues from earlier days (JSON) and the tickets of the last {hours} hours: each with its id, time,
+alarm title and the conclusion its worker reported. Group the tickets by root cause: the same upstream provider failing
+the same way, the same page section, the same database load, the same false-alarm pattern of one alarm rule. Match a
+group to a known issue when it is the same cause, and keep that issue's key; otherwise give it a new short kebab-case key.
+
+Answer with one JSON object and nothing else:
+{{"issues": [{{"key": "...", "title": "short Chinese title naming the thing and the cause",
+  "cause": "one or two Chinese sentences: what happens and why, from the conclusions",
+  "action": "one Chinese sentence: what a person should do, or 无需处理",
+  "owner": "who acts in Chinese, such as 供应商对接 / 前端 / 数据库 / 告警规则 / 无",
+  "needs_human": true or false, "ticket_ids": ["..."]}}],
+ "headline": "one Chinese sentence on the day: how many tickets, how many needed a person, the most important issue"}}
+
+Put every ticket in exactly one issue. needs_human is true only when a person has to fix or decide something (a real
+fault, a broken page, a quota, a config); a false alarm that only needs a rule change is needs_human false with owner
+告警规则. Use only what the conclusions say; do not invent causes.
+
+Known issues:
+{known}
+
+Tickets:
+{tickets}
+"""
+
+
+class Invalid(Exception):
+    """A bad argument."""
+
+
+def now_utc():
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def parse_time(text):
+    return datetime.datetime.fromisoformat(text.replace('Z', '+00:00'))
+
+
+def conclusion(summary):
+    """The **结论** part of a report, else its first lines, cut to CONCLUSION_CHARS."""
+    match = re.search(r'\*\*(?:结论|Conclusion)\*\*\s*[:：]?\s*([\s\S]*?)(?=\n\s*\*\*[^*\n]+\*\*|$)', summary or '')
+    text = re.sub(r'\s+', ' ', (match.group(1) if match else summary or '')).strip()
+    return text[:CONCLUSION_CHARS]
+
+
+def read_tickets(state_dir, since):
+    """`[{id, at, title, conclusion}]` of the tickets created since `since`, oldest first, from the read-only database."""
+    path = Path(state_dir) / 'orchestrator.sqlite'
+    if not path.exists():
+        raise RuntimeError(f'no database at {path}')
+    with sqlite3.connect(f'file:{path}?mode=ro', uri=True) as db:
+        rows = [json.loads(value) for (value,) in db.execute('SELECT value FROM ticket')]
+    tickets = []
+    for ticket in rows:
+        at = parse_time(ticket['createdAt'])
+        if at < since:
+            continue
+        report = next((item['report'] for item in reversed(ticket.get('assignments') or []) if item.get('report')), None)
+        tickets.append({'id': ticket['id'][:8], 'at': at.astimezone(SHANGHAI).strftime('%m-%d %H:%M'), 'title': ticket['title'][:160],
+                        'outcome': (ticket.get('ended') or {}).get('outcome', 'open'),
+                        'conclusion': conclusion((report or {}).get('summary', ''))})
+    tickets.sort(key=lambda item: item['at'])
+    return tickets[-MAX_TICKETS:]
+
+
+def api_key(credentials, ref):
+    """The gateway key named `ref` in the DSH credentials file; it is never printed."""
+    text = Path(credentials).read_text()
+    match = re.search(r'^\s*' + re.escape(ref) + r'\s*:\s*["\']?([^"\'\n]+)["\']?\s*$', text, re.M)
+    if not match:
+        raise RuntimeError(f'{ref} not found in {credentials}')
+    return match.group(1).strip()
+
+
+def ask(base_url, key, model, prompt):
+    """The model's text answer to one user message through the Anthropic Messages API."""
+    body = json.dumps({'model': model, 'max_tokens': 4000, 'messages': [{'role': 'user', 'content': prompt}]}).encode()
+    request = urllib.request.Request(base_url.rstrip('/') + '/v1/messages', data=body, method='POST', headers={
+        'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01'})
+    try:
+        with urllib.request.urlopen(request, timeout=180) as response:
+            answer = json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        raise RuntimeError(f'the gateway answered {error.code}: {error.read()[:300]!r}') from None
+    return ''.join(part.get('text', '') for part in answer.get('content') or [] if part.get('type') == 'text')
+
+
+def parse_answer(text, ticket_ids):
+    """The issues and headline of the model's JSON answer; tickets it left out go to one `unsorted` issue."""
+    match = re.search(r'\{[\s\S]*\}', text)
+    if not match:
+        raise RuntimeError('the model answered no JSON object')
+    answer = json.loads(match.group(0))
+    issues, seen = [], set()
+    for issue in answer.get('issues') or []:
+        key = re.sub(r'[^a-z0-9-]+', '-', str(issue.get('key', '')).lower()).strip('-')[:48]
+        ids = [str(item)[:8] for item in issue.get('ticket_ids') or [] if str(item)[:8] in ticket_ids and str(item)[:8] not in seen]
+        if not key or not ids:
+            continue
+        seen.update(ids)
+        issues.append({'key': key, 'title': str(issue.get('title', key))[:80], 'cause': str(issue.get('cause', ''))[:400],
+                       'action': str(issue.get('action', ''))[:200], 'owner': str(issue.get('owner', ''))[:30],
+                       'needs_human': bool(issue.get('needs_human')), 'ticket_ids': ids})
+    left = [item for item in ticket_ids if item not in seen]
+    if left:
+        issues.append({'key': 'unsorted', 'title': '未归类', 'cause': '', 'action': '', 'owner': '', 'needs_human': False, 'ticket_ids': left})
+    return issues, str(answer.get('headline', ''))[:300]
+
+
+def merge(known, issues, now):
+    """The known list after today's issues: matched ones updated, new ones added, quiet ones marked, old quiet ones dropped."""
+    by_key = {issue['key']: dict(issue) for issue in known}
+    stamp = now.isoformat(timespec='seconds')
+    for issue in issues:
+        if issue['key'] == 'unsorted':
+            continue
+        entry = by_key.get(issue['key'], {'key': issue['key'], 'firstSeen': stamp, 'tickets': 0})
+        entry.update({k: issue[k] for k in ('title', 'cause', 'action', 'owner', 'needs_human')})
+        entry['tickets'] = entry.get('tickets', 0) + len(issue['ticket_ids'])
+        entry['lastSeen'] = stamp
+        entry['status'] = 'open'
+        by_key[issue['key']] = entry
+    kept = []
+    for entry in by_key.values():
+        quiet = now - parse_time(entry.get('lastSeen', stamp))
+        if quiet > datetime.timedelta(days=DROP_DAYS):
+            continue
+        if quiet > datetime.timedelta(hours=QUIET_HOURS):
+            entry['status'] = 'quiet'
+        kept.append(entry)
+    return sorted(kept, key=lambda entry: (entry['status'] != 'open', not entry.get('needs_human'), entry.get('lastSeen', '')), reverse=False)
+
+
+def known_markdown(known, now):
+    """The list workers read: one line per open issue with its cause, since when, and what to check before re-investigating."""
+    lines = [f'# 已知问题（更新于 {now.astimezone(SHANGHAI):%m-%d %H:%M} 北京时间）', '',
+             '新告警先对照这里：如果是同一个问题，先用一两条查询确认它还是同一原因、有没有新变化，再在回复里写明「已知问题：<标题>，自 <首次> 起」，'
+             '不必从头排查；只有证据显示原因变了，才按新问题处理。', '']
+    for entry in known:
+        first = parse_time(entry['firstSeen']).astimezone(SHANGHAI).strftime('%m-%d %H:%M')
+        last = parse_time(entry['lastSeen']).astimezone(SHANGHAI).strftime('%m-%d %H:%M')
+        tag = '安静' if entry['status'] == 'quiet' else ('需要人处理' if entry.get('needs_human') else '无需处理')
+        lines.append(f'- **{entry["title"]}**（`{entry["key"]}`，{tag}，{entry.get("tickets", 0)} 张工单，首次 {first}，最近 {last}）：{entry["cause"]} 建议：{entry["action"]}')
+    return '\n'.join(lines) + '\n'
+
+
+def digest_markdown(issues, headline, hours, total, now):
+    stamp = now.astimezone(SHANGHAI).strftime('%m-%d %H:%M')
+    human = [issue for issue in issues if issue['needs_human']]
+    rest = [issue for issue in issues if not issue['needs_human']]
+    lines = [f'**工单日报 {stamp}**（过去 {hours} 小时，{total} 张工单，归为 {len(issues)} 类）', headline, '']
+    if human:
+        lines.append('**需要人处理**')
+        lines += [f'- **{issue["title"]}**（{len(issue["ticket_ids"])} 张，{issue["owner"] or "待定"}）：{issue["action"]}' for issue in human]
+        lines.append('')
+    if rest:
+        lines.append('**无需处理**')
+        lines += [f'- {issue["title"]}（{len(issue["ticket_ids"])} 张）' + (f'：{issue["action"]}' if issue['action'] and issue['action'] != '无需处理' else '')
+                  for issue in rest]
+    lines.append('')
+    lines.append('想看某一类的工单，在群里 @ 值班机器人问。')
+    return '\n'.join(lines)
+
+
+def post(lark, chat, text):
+    with tempfile.TemporaryDirectory(prefix='ticket-digest-') as scratch:
+        Path(scratch, 'digest.md').write_text(text)
+        result = subprocess.run([lark, 'im', '+messages-send', '--chat-id', chat, '--markdown', '@digest.md', '--as', 'bot'],
+                                cwd=scratch, capture_output=True, text=True, timeout=120)
+    if result.returncode != 0:
+        raise RuntimeError(f'lark-cli send exited {result.returncode}: {(result.stderr or result.stdout).strip()[-300:]}')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--state-dir', required=True, help="the plugin's stateDir, which holds orchestrator.sqlite")
+    parser.add_argument('--known', required=True, type=Path, help='the known-issues JSON; a .md beside it is written for workers')
+    parser.add_argument('--chat', required=True, help='the Feishu chat id to post to')
+    parser.add_argument('--hours', type=int, default=24)
+    parser.add_argument('--credentials', default=os.path.expanduser('~/.dsh/.credentials.yaml'))
+    parser.add_argument('--key-ref', default='ONCALL_LLM_API_KEY')
+    parser.add_argument('--base-url', default=os.environ.get('ONCALL_LLM_BASE_URL', ''))
+    parser.add_argument('--model', default=os.environ.get('ONCALL_DIGEST_MODEL', ''))
+    parser.add_argument('--lark-cli', default='lark-bot')
+    parser.add_argument('--dry-run', action='store_true', help='print the digest and the known list; post and write nothing')
+    args = parser.parse_args()
+    try:
+        if not re.fullmatch(r'oc_[A-Za-z0-9]+', args.chat):
+            raise Invalid('--chat must be a Feishu chat id (oc_...)')
+        if not 1 <= args.hours <= 168:
+            raise Invalid('--hours must be 1-168')
+        if not args.base_url.startswith('https://') or not args.model:
+            raise Invalid('--base-url (https://...) and --model are required, or ONCALL_LLM_BASE_URL and ONCALL_DIGEST_MODEL')
+    except Invalid as error:
+        print(f'oncall-ticket-digest: {error}', file=sys.stderr)
+        return 2
+    now = now_utc()
+    try:
+        tickets = read_tickets(args.state_dir, now - datetime.timedelta(hours=args.hours))
+        known = json.loads(args.known.read_text()) if args.known.exists() else []
+        if tickets:
+            prompt = PROMPT.format(hours=args.hours, known=json.dumps([{k: entry.get(k) for k in ('key', 'title', 'cause', 'status')} for entry in known],
+                                                                         ensure_ascii=False), tickets=json.dumps(tickets, ensure_ascii=False, indent=0))
+            issues, headline = parse_answer(ask(args.base_url, api_key(args.credentials, args.key_ref), args.model, prompt), [t['id'] for t in tickets])
+        else:
+            issues, headline = [], f'过去 {args.hours} 小时没有工单。'
+        known = merge(known, issues, now)
+        text = digest_markdown(issues, headline, args.hours, len(tickets), now)
+        if args.dry_run:
+            print(text)
+            print('\n---\n' + known_markdown(known, now))
+            return 0
+        args.known.parent.mkdir(parents=True, exist_ok=True)
+        args.known.write_text(json.dumps(known, ensure_ascii=False, indent=1) + '\n')
+        args.known.with_suffix('.md').write_text(known_markdown(known, now))
+        post(args.lark_cli, args.chat, text)
+    except (RuntimeError, OSError, ValueError, sqlite3.Error, subprocess.TimeoutExpired) as error:
+        print(f'oncall-ticket-digest: {error}', file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
