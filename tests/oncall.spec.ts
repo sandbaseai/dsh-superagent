@@ -164,6 +164,15 @@ function tc3(request: Recorded, service = 'cls'): string {
 const clsConfig = (url: string) => config('prod', [`CLS_SECRET_ID=${SECRET_ID}`, `CLS_SECRET_KEY=${SECRET_KEY}`,
   'CLS_REGION=ap-singapore', 'CLS_TOPIC_ID=topic-default', 'CLS_TOPICS=api=topic-api,web=topic-web', `CLS_ENDPOINT=${url}`])
 
+it('prints the rows of a SQL analysis from AnalysisResults, and from AnalysisRecords in an older answer', async () => {
+  const pairs = (row: Record<string, string>) => ({ Data: Object.entries(row).map(([Key, Value]) => ({ Key, Value })) })
+  clsConfig(await serve({ Response: { RequestId: 'r1', ListOver: true, Analysis: true, Results: [], AnalysisRecords: [],
+    AnalysisResults: [pairs({ provider: 'provider-a', n: '120' }), pairs({ provider: 'null', n: '7' })] } }))
+  const grouped = JSON.parse((await run(['cls', '--env', 'prod', '--query', '* | select provider, count(*) as n group by provider'])).stdout)
+  expect(grouped.analysis).toEqual([{ provider: 'provider-a', n: '120' }, { provider: 'null', n: '7' }])
+  clsConfig(await serve({ Response: { RequestId: 'r2', ListOver: true, Analysis: true, Results: [], AnalysisRecords: ['{"n":"3"}'] } }))
+  expect(JSON.parse((await run(['cls', '--env', 'prod', '--query', '* | select count(*) as n'])).stdout).analysis).toEqual([{ n: '3' }])
+})
 it('signs a SearchLog request and prints the parsed results', async () => {
   clsConfig(await serve({ Response: { RequestId: 'r1', ListOver: true, Analysis: false,
     Results: [{ Time: 1762800000000, Source: '10.0.0.1', LogJson: '{"level":"error","msg":"boom"}' },

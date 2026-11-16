@@ -297,6 +297,14 @@ def log_entry(result):
     return entry
 
 
+def analysis_rows(response):
+    """The rows of a SearchLog SQL analysis as objects: CLS fills `AnalysisResults` (key-value pairs, its current form),
+    and older answers carry `AnalysisRecords` (JSON strings). Numbers come back as text and are kept that way."""
+    rows = [{item.get('Key'): item.get('Value') for item in result.get('Data') or []}
+            for result in response.get('AnalysisResults') or [] if isinstance(result, dict)]
+    return rows or [parse_json(record) for record in response.get('AnalysisRecords') or []]
+
+
 def command_cls(args):
     """Search one CLS topic with SearchLog and print the results."""
     values = load(args.env)
@@ -330,7 +338,7 @@ def command_cls(args):
     payload = {'topic': topic, 'from': start, 'to': end, 'count': len(results), 'listOver': response.get('ListOver'),
                'results': results}
     if response.get('Analysis'):
-        payload['analysis'] = [parse_json(record) for record in response.get('AnalysisRecords') or []]
+        payload['analysis'] = analysis_rows(response)
     while size(payload) > MAX_OUTPUT and (payload['results'] or payload.get('analysis')):
         payload['truncated'] = True
         (payload['results'] or payload['analysis']).pop()
