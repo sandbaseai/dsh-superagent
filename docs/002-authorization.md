@@ -77,7 +77,7 @@ The admission table is part of the Policy version. Weakening a cell does not imm
 ### Bots and automated reviewers
 
 The host recognizes GitHub Apps, logins ending in `[bot]`, and Feishu bots as bots. A Source can list bots such as `dependabot[bot]` whose messages may become inferred candidates. They must either address the agent or post in a scope that receives every message. They cannot make explicit requests or stop Tickets.
-When the Feishu Source parses a listed bot's message as an alert, its primary Thread is the alert Thread of its policy and object. The gate ignores a recovery notice (`alert_recovered`) and a repeat while a live Ticket is on that Thread (`alert_repeat`) without an assessment.
+When the Feishu Source parses a listed bot's message as an alert, its primary Thread is the alert Thread of its policy and object. The Feishu Source's `screen` sets aside a recovery notice (`alert_recovered`) and a repeat while a live Ticket is on that Thread (`alert_repeat`) before the gate admits it, without an assessment. When three bot messages in a row look like alerts but do not parse, its `alerts` health entry reports an error, since the monitoring bot's format has probably changed.
 
 An automated reviewer using an ordinary account counts as a person to the host. Its comments reach subscribed Tickets and generate follow-up notices. Team prompt text must identify such accounts as automated reviewers.
 

@@ -4,6 +4,7 @@
  * its repeated firings and its recovery share an alert Thread.
  */
 import { createHash } from 'node:crypto'
+import { liveTicket, type Ticket, type Trigger } from '../core/index.ts'
 
 export interface FeishuAlert {
   kind: 'prometheus' | 'cloud-monitor' | 'cls' | 'fallback-page' | 'tencent'
@@ -74,6 +75,24 @@ export function parseAlert(text: string): FeishuAlert | undefined {
       field(lines, '地域') ?? '')
   }
   return undefined
+}
+/**
+ * Whether a message has the shape of a notice `parseAlert` reads (the Tencent title, a fallback-page title, or a `告警策略` or
+ * `通知类型` line), so that failing to parse it means the monitoring bot's format changed.
+ */
+export function looksLikeAlert(text: string): boolean {
+  const first = text.split('\n')[0] ?? ''
+  return first.includes(TENCENT) || /兜底页告警/.test(first) || /^\s*(?:告警策略|通知类型)\s*[:：]/m.test(text)
+}
+/**
+ * Sets a listed bot's alert aside before assessment: its recovery notice (`alert_recovered`), and a repeat while a ticket on
+ * its alert Thread is live (`alert_repeat`).
+ */
+export function screenAlert(trigger: Trigger, tickets: Ticket[]): string | undefined {
+  const alert = trigger.meta.alert as Partial<FeishuAlert> | undefined
+  if (typeof alert?.status !== 'string') return undefined
+  if (alert.status === 'recovered') return 'alert_recovered'
+  return tickets.some(liveTicket) ? 'alert_repeat' : undefined
 }
 /** The id of a chat's alert Thread for `key`, under the Feishu Source. */
 export const alertThreadId = (chatId: string, key: string): string => `${chatId}:alert:${key}`

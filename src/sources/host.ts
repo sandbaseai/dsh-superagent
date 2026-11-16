@@ -15,6 +15,8 @@ export const HEALTH_TEXT = {
   feishuBotMissing: 'Waiting for the Feishu bot',
   githubUnset: 'The GitHub Source names no repository or agent CLI; GitHub is off',
   pollFailures: '{count} consecutive failed polls; last: {error}',
+  alertsParsed: 'Alert notices are recognized',
+  alertsUnparsed: '{count} bot messages in a row look like alerts but could not be parsed; the alert format may have changed. Last: {text}',
 } as const
 export type HealthCode = keyof typeof HEALTH_TEXT
 export type Health = { state: 'starting' | 'ready' | 'paused' | 'error'; detail: string; at?: string; code?: HealthCode; values?: Record<string, string> }

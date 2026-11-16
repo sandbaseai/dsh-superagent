@@ -4,7 +4,7 @@ import { createInterface } from 'node:readline'
 import { setTimeout as delay } from 'node:timers/promises'
 import { z } from 'zod'
 import { threadKey, type Thread, type Trigger } from '../core/index.ts'
-import { isAlertThread, type FeishuAlert } from './feishu-alert.ts'
+import { isAlertThread, looksLikeAlert, type FeishuAlert } from './feishu-alert.ts'
 import { feishuChatLink } from './feishu-channel.ts'
 import type { FeishuBot } from '../deployment.ts'
 import { validItems, type Tally } from '../infra/commands.ts'
@@ -32,9 +32,27 @@ const bot = (ctx: SourceContext): FeishuBot => {
   if (!resolved) throw new Error('The Feishu Source has no working bot CLI')
   return resolved
 }
+/** How many bot messages in a row that look like alerts but do not parse report the `alerts` entry as an error. */
+export const UNPARSED_ALERTS = 3
+const unparsedAlerts = new WeakMap<SourceContext, number>()
+/** Counts a newly stored bot message toward the `alerts` entry: a parsed alert clears it, an alert-shaped message that did not parse adds one. */
+export function countAlert(ctx: SourceContext, trigger: Trigger): void {
+  if (trigger.human) return
+  if (trigger.meta.alert) {
+    if (unparsedAlerts.get(ctx)) ctx.report('alerts', health('ready', 'alertsParsed'))
+    unparsedAlerts.set(ctx, 0)
+    return
+  }
+  if (!looksLikeAlert(trigger.text)) return
+  const count = (unparsedAlerts.get(ctx) ?? 0) + 1
+  unparsedAlerts.set(ctx, count)
+  const text = (trigger.text.split('\n')[0] ?? '').slice(0, 80)
+  if (count >= UNPARSED_ALERTS) ctx.report('alerts', health('error', 'alertsUnparsed', { count: String(count), text }))
+}
 async function receive(ctx: SourceContext, trigger: Trigger, signal?: AbortSignal): Promise<void> {
   const result = await ctx.receive(trigger)
   const config = enabled(ctx)
+  if (result === 'stored') countAlert(ctx, trigger)
   // Only a newly stored alarm is answered; a message read again by an overlapping history round is not.
   if (result === 'stored' && config) await repeatNotice(ctx, trigger, config, signal)
   const chatId = String(trigger.meta.chatId ?? '')
@@ -144,6 +162,7 @@ async function chatNamesLoop(ctx: SourceContext, signal: AbortSignal): Promise<v
 async function backfillLoop(ctx: SourceContext, signal: AbortSignal): Promise<void> {
   await ctx.ready
   if (!available(ctx)) { ctx.report('history', health('paused', 'feishuBotMissing')); return }
+  if (!unparsedAlerts.get(ctx)) ctx.report('alerts', health('ready', 'alertsParsed'))
   while (!signal.aborted) {
     const config = enabled(ctx)
     if (!config) {
