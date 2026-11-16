@@ -19,9 +19,12 @@ import math
 import os
 from pathlib import Path
 import re
+import shutil
+import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -30,12 +33,15 @@ import urllib.request
 ENV_NAME = re.compile(r'^[a-z0-9][a-z0-9-]{0,30}$')
 KNOWN_KEYS = {'DESCRIPTION', 'CLS_SECRET_ID', 'CLS_SECRET_KEY', 'CLS_REGION', 'CLS_TOPIC_ID', 'CLS_TOPICS', 'CLS_ENDPOINT', 'KUBECONFIG',
               'KUBE_CONTEXT', 'KUBE_NAMESPACE', 'KUBECTL', 'GRAFANA_BASE_URL', 'GRAFANA_TOKEN', 'MONITOR_SECRET_ID',
-              'MONITOR_SECRET_KEY', 'MONITOR_REGION', 'MONITOR_ENDPOINT', 'CDB_ENDPOINT', 'PROM_URL', 'PROM_USER', 'PROM_TOKEN', 'GRAFANA_PROM_UID'}
-SECRET_KEYS = ('CLS_SECRET_ID', 'CLS_SECRET_KEY', 'GRAFANA_TOKEN', 'MONITOR_SECRET_ID', 'MONITOR_SECRET_KEY', 'PROM_TOKEN')
+              'MONITOR_SECRET_KEY', 'MONITOR_REGION', 'MONITOR_ENDPOINT', 'CDB_ENDPOINT', 'DB_READ_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER',
+              'DB_PASSWORD', 'DB_PROXY_NAMESPACE', 'DB_PROXY_POD', 'MYSQL', 'PROM_URL', 'PROM_USER', 'PROM_TOKEN', 'GRAFANA_PROM_UID'}
+SECRET_KEYS = ('CLS_SECRET_ID', 'CLS_SECRET_KEY', 'GRAFANA_TOKEN', 'MONITOR_SECRET_ID', 'MONITOR_SECRET_KEY', 'PROM_TOKEN', 'DB_PASSWORD')
 GROUPS = {'cls': ('CLS_SECRET_ID', 'CLS_SECRET_KEY', 'CLS_REGION'), 'kube': ('KUBECONFIG', 'KUBE_CONTEXT', 'KUBE_NAMESPACE'),
           'grafana': ('GRAFANA_BASE_URL', 'GRAFANA_TOKEN'), 'monitor': ('MONITOR_SECRET_ID', 'MONITOR_SECRET_KEY', 'MONITOR_REGION'),
           # TencentDB reads use the Cloud Monitor credentials: the same read-only sub-account.
-          'cdb': ('MONITOR_SECRET_ID', 'MONITOR_SECRET_KEY', 'MONITOR_REGION')}
+          'cdb': ('MONITOR_SECRET_ID', 'MONITOR_SECRET_KEY', 'MONITOR_REGION'),
+          'db': ('DB_READ_HOST', 'DB_NAME', 'DB_USER', 'DB_PASSWORD', 'DB_PROXY_NAMESPACE', 'DB_PROXY_POD', 'KUBECONFIG',
+                 'KUBE_CONTEXT')}
 # `prom` is reported when either of these key sets is complete (see prom_base).
 PROM_GROUPS = (('PROM_URL', 'PROM_TOKEN'), ('GRAFANA_BASE_URL', 'GRAFANA_TOKEN', 'GRAFANA_PROM_UID'))
 MAX_OUTPUT = 200 * 1024
@@ -833,6 +839,148 @@ def command_kube(env, args):
     return 0 if result.returncode == 0 else 1
 
 
+# ---- db ----
+
+MAX_SQL = 4000
+MAX_ROWS = 200
+SQL_TIMEOUT_MS = 10000
+NAME_VALUE = re.compile(r'^[A-Za-z0-9_.-]+$')
+# Statements that only read. A SELECT or WITH must name its own LIMIT, so the instance never builds a large answer.
+READ_START = re.compile(r'^\s*(select|with|show|explain|describe|desc)\b', re.I)
+NEEDS_LIMIT = re.compile(r'^\s*(select|with)\b', re.I)
+LIMIT = re.compile(r'\blimit\s+(\d+)(\s*,\s*(\d+))?\s*$', re.I)
+FORBIDDEN_SQL = re.compile(r'\binto\s+(outfile|dumpfile|@)|\bfor\s+update\b|\block\s+in\s+share\s+mode\b|\b(sleep|benchmark|'
+                           r'load_file|get_lock|release_lock)\s*\(|\b(insert|update|delete|replace|create|alter|drop|truncate|'
+                           r'grant|revoke|set|call|handler|load|lock|unlock|rename|kill|flush|purge|reset|install|uninstall)\b', re.I)
+# Column names whose values are credentials or contact details; their values are replaced.
+MASKED_COLUMN = re.compile(r'pass|secret|token|api_?key$|^key$|_key$|cookie|email|phone|mobile|id_card|address', re.I)
+
+
+def strip_sql(text):
+    """The statement without comments, string literals and quoted names, for the checks; raises on a second statement."""
+    without = re.sub(r"/\*.*?\*/|--[^\n]*|#[^\n]*", ' ', text, flags=re.S)
+    plain = re.sub(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"|`[^`]*`", "''", without, flags=re.S).strip()
+    if plain.endswith(';'):
+        plain = plain[:-1].rstrip()
+    if ';' in plain:
+        raise Refused('refused: db runs one statement; remove the ;')
+    return plain
+
+
+def check_sql(text):
+    """Refuse anything but one reading statement of bounded size, and a SELECT or WITH without a small LIMIT."""
+    if not text or len(text) > MAX_SQL:
+        raise Refused('refused: --query needs one SQL statement of at most ' + str(MAX_SQL) + ' characters')
+    plain = strip_sql(text)
+    if not READ_START.match(plain):
+        raise Refused('refused: db runs only SELECT, WITH, SHOW, EXPLAIN or DESCRIBE')
+    found = FORBIDDEN_SQL.search(plain)
+    if found and not (plain.lower().startswith('show') and found.group(0).lower() == 'set'):
+        raise Refused('refused: db does not run ' + found.group(0).strip() + ': it only reads')
+    if NEEDS_LIMIT.match(plain):
+        limit = LIMIT.search(plain)
+        rows = int(limit.group(3) or limit.group(1)) if limit else None
+        if rows is None or rows > MAX_ROWS:
+            raise Refused('refused: a SELECT or WITH must end with LIMIT n, n at most ' + str(MAX_ROWS))
+    return plain
+
+
+def parse_batch(text):
+    """`(columns, rows)` of mysql --batch output, undoing its escapes."""
+    unescape = lambda value: None if value == 'NULL' else re.sub(r'\\([\\tn0])', lambda m: {'\\': '\\', 't': '\t', 'n': '\n', '0': '\0'}[m.group(1)], value)
+    lines = text.split('\n')
+    if lines and lines[-1] == '':
+        lines.pop()
+    if not lines:
+        return [], []
+    columns = lines[0].split('\t')
+    return columns, [[unescape(cell) for cell in line.split('\t')] for line in lines[1:]]
+
+
+def free_port():
+    with socket.socket() as probe:
+        probe.bind(('127.0.0.1', 0))
+        return probe.getsockname()[1]
+
+
+def mysql_run(values, port, defaults, sql):
+    """Run one statement through the forwarded port and return `(exit code, stdout, stderr)`."""
+    command = [values.get('MYSQL') or shutil.which('mysql') or 'mysql', '--defaults-extra-file=' + defaults, '--protocol=TCP',
+               '--host=127.0.0.1', '--port=' + str(port), '--database=' + values['DB_NAME'], '--batch', '--connect-timeout=5',
+               '--init-command=SET SESSION TRANSACTION READ ONLY; SET SESSION MAX_EXECUTION_TIME=' + str(SQL_TIMEOUT_MS), '-e', sql]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=SQL_TIMEOUT_MS // 1000 + 15, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        raise Failed('mysql did not finish within ' + str(SQL_TIMEOUT_MS // 1000 + 15) + ' seconds')
+    except OSError as error:
+        raise Failed('mysql could not run: ' + type(error).__name__)
+    return result.returncode, result.stdout, result.stderr
+
+
+def command_db(args):
+    """Run one reading SQL statement on the environment's read-only MySQL instance through the proxy pod's port-forward."""
+    plain = check_sql(args.query)
+    values = load(args.env)
+    require(values, args.env, *GROUPS['db'])
+    for key in ('DB_NAME', 'DB_USER', 'DB_PROXY_NAMESPACE', 'DB_PROXY_POD'):
+        if not NAME_VALUE.match(values[key]):
+            raise Refused('refused: ' + key + ' in the ' + args.env + ' environment file is not a plain name')
+    port = free_port()
+    forward = subprocess.Popen([find_kubectl(values), '--kubeconfig', values['KUBECONFIG'], '--context', values['KUBE_CONTEXT'],
+                                '-n', values['DB_PROXY_NAMESPACE'], 'port-forward', 'pod/' + values['DB_PROXY_POD'],
+                                str(port) + ':' + values.get('DB_PORT', '3306')],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, stdin=subprocess.DEVNULL)
+    try:
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            if forward.poll() is not None:
+                raise Failed('kubectl port-forward exited: ' + cut(forward.stderr.read(), 500)[0])
+            try:
+                socket.create_connection(('127.0.0.1', port), timeout=1).close()
+                break
+            except OSError:
+                time.sleep(0.3)
+        else:
+            raise Failed('the port-forward to ' + values['DB_PROXY_POD'] + ' did not open within 20 seconds')
+        with tempfile.TemporaryDirectory(prefix='dsh-oncall-db-') as scratch:
+            defaults = os.path.join(scratch, 'client.cnf')
+            with open(os.open(defaults, os.O_WRONLY | os.O_CREAT, 0o600), 'w') as out:
+                out.write('[client]\nuser=' + values['DB_USER'] + '\npassword="' + values['DB_PASSWORD'].replace('\\', '\\\\').replace('"', '\\"') + '"\n')
+            # The connection must land on a read-only instance; otherwise nothing runs.
+            code, stdout, stderr = mysql_run(values, port, defaults, 'SELECT @@global.read_only AS ro')
+            if code != 0:
+                raise Failed('mysql could not connect: ' + cut(stderr, 500)[0])
+            _, rows = parse_batch(stdout)
+            if not rows or rows[0][0] not in ('1', 'ON'):
+                raise Refused('refused: the instance behind ' + values['DB_PROXY_POD'] + ' is not read-only; db runs nothing')
+            started = time.monotonic()
+            code, stdout, stderr = mysql_run(values, port, defaults, args.query)
+            elapsed = round(time.monotonic() - started, 3)
+    finally:
+        forward.terminate()
+        try:
+            forward.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            forward.kill()
+    if code != 0:
+        emit({'error': cut(stderr.strip(), 2000)[0], 'seconds': elapsed})
+        return 1
+    columns, rows = parse_batch(stdout)
+    masked = [index for index, name in enumerate(columns) if MASKED_COLUMN.search(name)]
+    for row in rows:
+        for index in masked:
+            if index < len(row) and row[index] is not None:
+                row[index] = '<hidden>'
+        for index, cell in enumerate(row):
+            if isinstance(cell, str) and len(cell) > MAX_LINE:
+                row[index] = cell[:MAX_LINE] + '…'
+    payload = {'columns': columns, 'rows': rows[:MAX_ROWS], 'rowCount': len(rows), 'seconds': elapsed}
+    if masked:
+        payload['maskedColumns'] = [columns[index] for index in masked]
+    emit(shrink(payload, 'rows'))
+    return 0
+
+
 # ---- grafana ----
 
 UID = r'[A-Za-z0-9_-]+'
@@ -891,6 +1039,7 @@ USAGE = """usage:
   dsh-oncall monitor --env E --action GetMonitorData|DescribeAlarmHistories|DescribeBaseMetrics|DescribeAlarmPolicies
                      --params '<JSON object>' [--region ap-singapore]
   dsh-oncall cdb --env E --action DescribeDBInstances|DescribeSlowLogData --params '<JSON object>'
+  dsh-oncall db --env E --query 'SELECT ... LIMIT n'
   dsh-oncall prom --env E query --query Q [--time now]
   dsh-oncall prom --env E range --query Q [--from -1h] [--to now] [--step 60]
   dsh-oncall prom --env E series --match M [--match M ...] [--from -1h] [--to now]
@@ -903,7 +1052,9 @@ max(15, range/1100) seconds, so 7 days gives 550 s or more); series, labels and 
 StartTime/EndTime as ISO-8601 at most 24 h apart and Period >= 60; DescribeAlarmHistories takes StartTime/EndTime in
 epoch seconds at most 7 days apart and PageSize <= 100. cdb uses the monitor credentials; DescribeSlowLogData takes
 InstanceId, StartTime/EndTime in epoch seconds at most 24 h apart and Limit <= 100, masks SQL literals and adds a Summary
-of the statements ranked by total query time.
+of the statements ranked by total query time. db runs one SELECT/WITH (ending in LIMIT n <= 200), SHOW, EXPLAIN or
+DESCRIBE on the read-only instance through the proxy pod, in a read-only transaction of at most 10 s, after checking
+@@read_only; credential and contact columns come back as <hidden>.
 """
 
 
@@ -969,7 +1120,7 @@ def run(argv):
         if rest:
             raise Refused('refused: envs takes no arguments')
         return command_envs(None)
-    if command not in ('cls', 'monitor', 'cdb', 'prom', 'kube', 'grafana'):
+    if command not in ('cls', 'monitor', 'cdb', 'db', 'prom', 'kube', 'grafana'):
         raise Refused('refused: unknown command ' + command + '\n' + USAGE)
     env, rest = take_env(rest)
     if command == 'kube':
@@ -994,6 +1145,12 @@ def run(argv):
         options = parse_options(rest, spec)
         options.env = env
         return command_prom(sub, options)
+    if command == 'db':
+        options = parse_options(rest, {'--query': ('query', None, str)})
+        if not options.query:
+            raise Refused('refused: db needs --query\n' + USAGE)
+        options.env = env
+        return command_db(options)
     if command == 'cls':
         options = parse_options(rest, {'--query': ('query', None, str), '--topic': ('topic', None, str),
                                        '--from': ('from_', '-15m', str), '--to': ('to', 'now', str),
