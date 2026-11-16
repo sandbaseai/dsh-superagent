@@ -384,6 +384,12 @@ it('runs one SELECT through the proxy port-forward in a read-only session after 
   expect(calls[1]!.cnf).toContain(SECRET_KEY)
   expect(result.stdout + result.stderr).not.toContain(SECRET_KEY)
 })
+it('does not hide columns of a metadata statement such as EXPLAIN', async () => {
+  dbConfig()
+  const output = JSON.parse((await run(['db', '--env', 'prod', '--query', 'EXPLAIN SELECT 1 FROM t LIMIT 1'])).stdout)
+  expect(output.rows[0]).toEqual(['org-1', 'sk-live-1', 'a@b.c', 'line\tone'])
+  expect(output).not.toHaveProperty('maskedColumns')
+})
 it('runs nothing when the instance behind the proxy is not read-only', async () => {
   dbConfig('0')
   const result = await run(['db', '--env', 'prod', '--query', 'SHOW TABLES'])

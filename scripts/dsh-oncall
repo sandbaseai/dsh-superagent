@@ -1008,7 +1008,8 @@ def command_db(args):
         emit({'error': cut(stderr.strip(), 2000)[0], 'seconds': elapsed})
         return 1
     columns, rows = parse_batch(stdout)
-    masked = [index for index, name in enumerate(columns) if MASKED_COLUMN.search(name)]
+    # EXPLAIN, SHOW and DESCRIBE answer with metadata (an EXPLAIN's `key` is an index name), so only row reads are masked.
+    masked = [index for index, name in enumerate(columns) if MASKED_COLUMN.search(name)] if NEEDS_LIMIT.match(plain) else []
     for row in rows:
         for index in masked:
             if index < len(row) and row[index] is not None:
