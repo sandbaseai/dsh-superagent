@@ -2,13 +2,14 @@
 """Deploy a commit of this checkout to the running dsh-superagent service, and roll back if it does not come up healthy.
 
 Steps: check the checkout is clean, fetch, require the target commit to be on the deploy branch (default origin/main),
-check it out and build it while the service keeps running; back up the database; restart through
-scripts/dsh-superagent and require exit 0. If the build fails, the previous commit is checked out and rebuilt and the
-service is never stopped. If the restart fails, the previous commit is rebuilt, the database restored and the service
-restarted. Each run appends one line to the deploy log.
+and build it in a temporary worktree while the service keeps running, so a failed build never touches the running
+checkout. Then stop the service, back up its now quiescent database, check out and build the target in place, start
+it through scripts/dsh-superagent and require exit 0. If the start fails, the previous commit is checked out, rebuilt
+and started again; the database is restored from the backup only when the failed version changed its schema, so the
+messages it recorded as sent are not sent again. Each run appends one line to the deploy log.
 
-Exit 0 deployed (or nothing to do), 1 failed and rolled back, 2 refused before any change, 3 failed and the rollback
-failed too: a person must act.
+Exit 0 deployed (or nothing to do), 1 failed and the previous version runs, 2 refused before any change, 3 failed and
+the rollback failed too: a person must act.
 """
 
 import argparse
@@ -20,6 +21,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
 SERVICE = ROOT / 'scripts' / 'dsh-superagent'
@@ -30,9 +32,9 @@ class Refused(Exception):
     """A precondition failed before anything changed."""
 
 
-def run(*argv, check=True, quiet=False):
-    """Run a command in the checkout and return its stdout; a failure raises with its output."""
-    result = subprocess.run(argv, cwd=ROOT, capture_output=True, text=True)
+def run(*argv, check=True, quiet=False, cwd=ROOT):
+    """Run a command in the checkout (or `cwd`) and return its stdout; a failure raises with its output."""
+    result = subprocess.run(argv, cwd=cwd, capture_output=True, text=True)
     if not quiet and result.stdout.strip():
         print(result.stdout.rstrip())
     if check and result.returncode != 0:
@@ -51,10 +53,34 @@ def log_line(path, text):
     print(f'logged: {text}')
 
 
-def build():
-    print('== pnpm install && pnpm build')
-    run('pnpm', 'install', '--frozen-lockfile', quiet=True)
-    run('pnpm', 'build', quiet=True)
+def build(cwd=ROOT):
+    print('== pnpm install && pnpm build' + ('' if cwd == ROOT else f' in {cwd}'))
+    run('pnpm', 'install', '--frozen-lockfile', quiet=True, cwd=cwd)
+    run('pnpm', 'build', quiet=True, cwd=cwd)
+
+
+def trial_build(commit):
+    """Build `commit` in a temporary worktree, leaving the running checkout alone; a failure raises."""
+    parent = Path(tempfile.mkdtemp(prefix='dsh-superagent-build-'))
+    tree = parent / 'tree'
+    try:
+        git('worktree', 'add', '--quiet', '--detach', str(tree), commit)
+        build(tree)
+    finally:
+        run('git', 'worktree', 'remove', '--force', str(tree), check=False, quiet=True)
+        shutil.rmtree(parent, ignore_errors=True)
+
+
+def schema(database):
+    """The schema version the database records, or None without one."""
+    if not database.exists():
+        return None
+    with sqlite3.connect(f'file:{database}?mode=ro', uri=True) as db:
+        try:
+            row = db.execute("select value from kv where key = 'schema'").fetchone()
+        except sqlite3.Error:
+            return None
+    return row[0] if row else None
 
 
 def backup(database, directory, commit):
@@ -135,47 +161,55 @@ def main():
         print('dry run: nothing changed')
         return 0
 
-    # Build the target while the service keeps running the previous build. A failed build never stops the service.
+    # A failed build never stops the service: the target is built in a worktree of its own first.
     try:
-        git('checkout', '--quiet', '--detach', target)
-        build()
+        trial_build(target)
     except RuntimeError as error:
         print(f'build failed: {error}', file=sys.stderr)
-        try:
-            git('checkout', '--quiet', '--detach', previous)
-            build()
-        except RuntimeError as again:
-            log_line(args.log, f'{target[:7]} FAILED build; restoring {previous[:7]} failed too: {again}')
-            return 3
         log_line(args.log, f'{target[:7]} FAILED build; kept {previous[:7]} running')
         return 1
 
+    if service('stop', args) != 0:
+        # The previous version still runs from an unchanged checkout; start clears the stop marker the stop wrote.
+        service('start', args)
+        log_line(args.log, f'{target[:7]} not deployed: the service did not stop; {previous[:7]} keeps running')
+        return 1
+    # Stopped, the database takes no writes, so the backup holds everything the previous version recorded.
     saved = backup(database, backups, previous[:7])
-    code = service('restart', args)
+    before = schema(database)
+    try:
+        git('checkout', '--quiet', '--detach', target)
+        build()
+        code = service('start', args)
+    except RuntimeError as error:
+        print(f'deploy failed: {error}', file=sys.stderr)
+        code = None
     if code == 0:
         log_line(args.log, f'{short(target)} deployed (was {previous[:7]})')
         return 0
 
-    print(f'restart exited {code}; rolling back to {previous[:7]}', file=sys.stderr)
+    failure = f'FAILED start ({code})' if code is not None else 'FAILED build in place'
+    print(f'{failure}; rolling back to {previous[:7]}', file=sys.stderr)
     try:
         service('stop', args)
         git('checkout', '--quiet', '--detach', previous)
         build()
-        if saved:
+        # The previous version refuses a database of a newer schema; with the schema unchanged, keeping the database keeps
+        # the receipts of messages the failed version sent, which a restore would make the previous version send again.
+        if saved and schema(database) != before:
             shutil.copy2(saved, database)
             for suffix in ('-wal', '-shm'):
                 Path(f'{database}{suffix}').unlink(missing_ok=True)
-            print(f'database restored from {saved}')
+            print(f'database restored from {saved}: the failed version changed its schema')
         back = service('start', args)
     except RuntimeError as error:
-        log_line(args.log, f'{target[:7]} FAILED restart ({code}); rollback to {previous[:7]} failed: {error}')
+        log_line(args.log, f'{target[:7]} {failure}; rollback to {previous[:7]} failed: {error}')
         return 3
     if back != 0:
-        log_line(args.log, f'{target[:7]} FAILED restart ({code}); rolled back to {previous[:7]} but it exits {back}')
+        log_line(args.log, f'{target[:7]} {failure}; rolled back to {previous[:7]} but it exits {back}')
         return 3
-    log_line(args.log, f'{target[:7]} FAILED restart ({code}); rolled back to {previous[:7]}')
+    log_line(args.log, f'{target[:7]} {failure}; rolled back to {previous[:7]}')
     return 1
-
 
 if __name__ == '__main__':
     sys.exit(main())
