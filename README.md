@@ -8,6 +8,8 @@ dsh-superagent is a proactive coding agent for one GitHub repository, packaged a
 
 It is also a way of working with an agent: **take as little human attention as possible, and give as much value as possible.** An agent that can act for a whole team can also waste a whole team's attention, so it acts only when asked or when a rule the team wrote allows it, and speaks only when someone must act or can use a result. [docs/000-philosophy.md](docs/000-philosophy.md) explains the principle and what it asks of the operator.
 
+This repository is a fork that runs it as a Feishu alert on-call agent; [FORK.md](FORK.md) lists what it changed and how to sync with upstream.
+
 ## Setup
 
 Setup has many steps, so an agent does it with you. Ask your coding agent:
