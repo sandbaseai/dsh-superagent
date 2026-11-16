@@ -54,7 +54,7 @@ dsh-oncall cls --env <env> --topic <TopicId> --from <start> --to <end> --query '
 dsh-oncall cls --env <env> --topic <TopicId> --from <earlier window> --to <start> --query '<same analysis>'
 ```
 
-Rerun the alert's own condition first to confirm the numbers, then the error counts by path or message, then the top error messages, then the same analysis for an earlier window as the normal baseline. Field names depend on the topic's index; read a few raw results first when a field query returns nothing. When CLS answers that a field is not indexed, query `*` or a full-text word with a `--limit`, count the fields of the results yourself, and say in the reply that the counts are a sample.
+Rerun the alert's own condition first to confirm the numbers, then the error counts by path or message, then the top error messages, then the same analysis for an earlier window as the normal baseline. Field names depend on the topic's index; read a few raw results first when a field query returns nothing. When a topic indexes a field with statistics, count with SQL instead of sampling: `--query '<filter> | select provider, count(*) as n group by provider order by n desc limit 20'` returns exact counts in `analysis`; a field that is not indexed comes back as `null` or an error, and then sampling is the fallback. When CLS answers that a field is not indexed, query `*` or a full-text word with a `--limit`, count the fields of the results yourself, and say in the reply that the counts are a sample.
 
 ## 4. Prometheus and Grafana reads
 
