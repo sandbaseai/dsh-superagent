@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+"""Draw one PNG line chart from a Prometheus matrix read on stdin: oncall-chart --title T --out FILE [--unit U].
+
+dsh-oncall chart runs it with a Python that has matplotlib (CHART_PYTHON); it reads nothing but stdin and writes only --out.
+"""
+import argparse
+import datetime
+import json
+from pathlib import Path
+import sys
+
+FONT = '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc'
+LINES = 8
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--title', required=True)
+    parser.add_argument('--out', required=True)
+    parser.add_argument('--label', default='')
+    parser.add_argument('--tz', default='Asia/Shanghai')
+    args = parser.parse_args()
+    import matplotlib
+    matplotlib.use('Agg')
+    from matplotlib import dates, font_manager, pyplot
+    from zoneinfo import ZoneInfo
+    if Path(FONT).exists():
+        font_manager.fontManager.addfont(FONT)
+        matplotlib.rcParams['font.family'] = font_manager.FontProperties(fname=FONT).get_name()
+    tz = ZoneInfo(args.tz)
+    series = json.load(sys.stdin)
+    # The series with the largest totals, so a chart stays readable.
+    series.sort(key=lambda item: -sum(float(v) for _, v in item['values'] if v not in ('NaN', '+Inf', '-Inf')))
+    figure, axis = pyplot.subplots(figsize=(11, 4.2))
+    for item in series[:LINES]:
+        metric = item.get('metric') or {}
+        name = metric.get(args.label) if args.label else None
+        name = name or ', '.join(f'{k}={v}' for k, v in metric.items() if k != '__name__') or 'value'
+        points = [(float(t), float(v)) for t, v in item['values'] if v not in ('NaN', '+Inf', '-Inf')]
+        axis.plot([datetime.datetime.fromtimestamp(t, tz) for t, _ in points], [v for _, v in points], label=name[:40], linewidth=1.6)
+    axis.set_title(args.title, loc='left', fontsize=12)
+    axis.grid(alpha=0.3)
+    axis.xaxis.set_major_formatter(dates.DateFormatter('%m-%d %H:%M', tz=tz))
+    if series:
+        axis.legend(fontsize=8, ncol=4, loc='upper left', frameon=False)
+    figure.autofmt_xdate()
+    figure.tight_layout()
+    figure.savefig(args.out, dpi=110)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

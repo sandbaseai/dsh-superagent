@@ -264,6 +264,10 @@ python3 -m venv ~/.venvs/digest && ~/.venvs/digest/bin/pip install matplotlib
 7 9 * * * cd $HOME && PATH=$HOME/.local/bin:$PATH $HOME/.venvs/digest/bin/python $HOME/dsh-superagent/scripts/oncall-digest --config $HOME/kit-local/digest.json >> $HOME/digest.log 2>&1
 ```
 
+## 回复里带图
+
+worker 可以用 `dsh-oncall prom --env <env> chart --query ... --title ... --out <name>.png` 把一段 Prometheus 曲线画成 PNG，存进工单目录，然后在回复末尾单独写一行 `[[chart:<name>.png]]`。宿主发文字回复时会把这一行去掉，再把这张图作为图片回复发到同一个话题里。每条回复最多 3 张图；只接受工单目录里直接存放的 PNG，不超过 5 MiB，不跟随软链接。画图用的 Python 来自 env 文件的 `CHART_PYTHON`，默认是 `~/.venvs/digest/bin/python`，需要装好 matplotlib 和中文字体（见渠道日报一节）。
+
 ## 工单日报和已知问题
 
 `scripts/oncall-ticket-digest` 每天汇总一次过去 24 小时的工单。它只读地读取 dsh-superagent 的数据库（工单标题和报告里的结论），请模型按根因把工单归类，并和已有的「已知问题」对应起来，然后：
