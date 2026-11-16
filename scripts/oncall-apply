@@ -180,6 +180,12 @@ def apply(api, blocks, config):
     prompts = api.call('GET', 'prompts')
     answer = api.call('PUT', 'prompts', {'config': config, 'baseRevision': prompts['current']['revision']})
     print('saved prompts revision ' + str(answer.get('revision')))
+    # Saving the policy replaced the allowed list with the kit's; a sync chat refills it from the chat's members.
+    policy = dict(blocks).get('policy') or {}
+    if (policy.get('sources') or {}).get('feishu', {}).get('syncChat'):
+        synced = api.call('POST', 'policy-sync/feishu')
+        allowed = (((synced or {}).get('policy') or {}).get('sources') or {}).get('feishu', {}).get('allowed')
+        print('synced the Feishu allowed list from the sync chat' + ('' if allowed is None else ': ' + str(len(allowed)) + ' people'))
 def main():
     """Parse the arguments, then print or save the kit."""
     parser = argparse.ArgumentParser(description='Save the Feishu on-call kit through the dsh-superagent Management API.')

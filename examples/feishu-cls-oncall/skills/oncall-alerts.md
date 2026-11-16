@@ -60,6 +60,8 @@ Rerun the alert's own condition first to confirm the numbers, then the error cou
 
 `dsh-oncall prom` reads the Prometheus HTTP API: `query --query Q [--time T]`, `range --query Q --from --to --step` (at most 7 days; the step is raised to keep about 1100 points, so a 7-day window has steps of 550 s or more), `series --match M`, `labels`, `label-values --label NAME` (windows at most 6 h), `rules`, `alerts`. When the environment lists `grafana`, `dsh-oncall grafana --env <env> /api/search --param query=<name>` finds a dashboard such as the one the alert links.
 
+`dsh-oncall cdb --env <env> --action DescribeSlowLogData --params '{"InstanceId":"<id>","StartTime":<epoch s>,"EndTime":<epoch s>,"Limit":100,"SortBy":"Timestamp","OrderBy":"DESC"}'` reads a TencentDB for MySQL slow log (at most 24 h, literals masked as `?`) with a `Summary` ranking the statements by total query time; `--action DescribeDBInstances` lists the instance ids. For a database alarm such as IOPS or CPU at its limit, read the slow log of that instance before guessing at the cause.
+
 ## 5. Read Kubernetes
 
 Find the workload from the alert labels or log fields (service, pod, container) and read its state:
