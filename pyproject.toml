@@ -1,0 +1,11 @@
+# Lint configuration for the operator scripts in scripts/, which are Python files without an extension.
+[tool.ruff]
+target-version = "py38"
+line-length = 160
+extend-include = ["scripts/*"]
+extend-exclude = ["node_modules", "lib", ".artifacts", "scripts/__pycache__"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "SIM"]
+# Short lambdas name small local helpers in these scripts.
+ignore = ["E731"]

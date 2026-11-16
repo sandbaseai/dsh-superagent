@@ -47,13 +47,13 @@ def read_text(path):
     try:
         return path.read_text(encoding='utf-8').rstrip()
     except OSError as error:
-        raise Invalid('cannot read ' + str(path) + ': ' + error.strerror)
+        raise Invalid('cannot read ' + str(path) + ': ' + error.strerror) from None
 def read_json(path):
     """Return a kit file parsed as JSON."""
     try:
         return json.loads(read_text(path))
     except ValueError as error:
-        raise Invalid(str(path) + ' is not JSON: ' + str(error))
+        raise Invalid(str(path) + ' is not JSON: ' + str(error)) from None
 def placeholders(value):
     """Return every `<...>` placeholder left in the strings of a JSON value."""
     if isinstance(value, str):
@@ -120,9 +120,9 @@ class Api:
             with urllib.request.urlopen(request, timeout=30) as response:
                 return json.loads(response.read().decode('utf-8') or 'null')
         except urllib.error.HTTPError as error:
-            raise Refused(method + ' ' + path + ' answered ' + str(error.code) + ': ' + refusal(error.read()))
+            raise Refused(method + ' ' + path + ' answered ' + str(error.code) + ': ' + refusal(error.read())) from None
         except (urllib.error.URLError, OSError, ValueError) as error:
-            raise Refused(method + ' ' + path + ' failed: ' + str(getattr(error, 'reason', error)))
+            raise Refused(method + ' ' + path + ' failed: ' + str(getattr(error, 'reason', error))) from None
     def answers(self):
         """Return whether `GET state` answers now."""
         try:

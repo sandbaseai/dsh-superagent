@@ -48,6 +48,7 @@
     "build": "tsdown",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "lint:scripts": "uvx ruff@0.14 check",
     "check": "pnpm typecheck && pnpm test && pnpm build"
   },
   "engines": {

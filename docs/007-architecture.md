@@ -454,6 +454,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/class-docs.spec.ts` | Every class in `src` has a JSDoc block before it |
 | `tests/docs.spec.ts` | Numbered documents link only to earlier ones, every local link resolves, no document has merge conflict markers, and this document's tables list every module and every test |
 
+CI (`.github/workflows/ci.yml`) runs `pnpm typecheck`, `pnpm test` and `pnpm build` on every pull request and on `main`, and lints the Python scripts in `scripts/` with ruff (`pnpm lint:scripts`, configured in `pyproject.toml`).
+
 `tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `panel-server.ts` and `panel.tsx`, the fake management API and the panel around a page; `deployment.ts`, a resolved deployment; `git.ts`, the environment of every git the tests start, which names no repository; and `async.ts`.
 
 ## Persistence
