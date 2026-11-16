@@ -159,7 +159,7 @@ describe('scripts/oncall-apply', () => {
       stderr: expect.stringContaining('the executor block still has placeholders: <absolute work directory>') })
   })
 
-  it('saves the settings blocks in order with GET settings revisions, waits after a restarting save, then saves the prompts', async () => {
+  it('saves the settings blocks in order with GET settings revisions, waits after a restarting save, then saves the prompts, and syncs a sync chat\'s members last', async () => {
     const seen: { method: string; path: string; header: unknown; body?: Record<string, unknown> }[] = []
     let restarted = false, down = 0
     const revisionsNow = () => restarted ? { feishu: 12, policy: 13, eval: 14, executor: 15 } : { feishu: 2, policy: 3, eval: 4, executor: 5 }
@@ -179,21 +179,29 @@ describe('scripts/oncall-apply', () => {
       if (path.startsWith('settings/')) return reply(200, { saved: true, revision: 99, restarting: false })
       if (path === 'prompts' && request.method === 'GET') return reply(200, { current: { revision: 7, config: {} } })
       if (path === 'prompts') return reply(200, { revision: 8 })
+      if (path === 'policy-sync/feishu') return reply(200, { policy: { sources: { feishu: { allowed: [{ id: 'ou_a' }, { id: 'ou_b' }] } } } })
       return reply(404, { error: 'Not found' })
     })
     await new Promise<void>(resolve => server!.listen(0, '127.0.0.1', resolve))
     const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
-    const result = await apply('--url', url, ...ARGS)
+    // A kit whose policy names a sync chat: its members refill the allowed list after the policy is saved.
+    const kit = join(scratch('oncall-kit-'), 'kit')
+    cpSync(KIT, kit, { recursive: true })
+    const policy = JSON.parse(readFileSync(join(kit, 'settings', 'policy.json'), 'utf8'))
+    policy.sources.feishu.syncChat = 'oc_members'
+    writeFileSync(join(kit, 'settings', 'policy.json'), JSON.stringify(policy))
+    const result = await apply('--url', url, '--kit', kit, ...ARGS)
     expect(result).toMatchObject({ code: 0, stderr: '' })
     expect(result.stdout.trim().split('\n')).toEqual(['saved source:feishu revision 3 (restarting)', 'saved policy revision 99', 'saved eval revision 99',
-      'saved executor revision 99', 'saved prompts revision 8'])
+      'saved executor revision 99', 'saved prompts revision 8', 'synced the Feishu allowed list from the sync chat: 2 people'])
     expect(seen.map(({ method, path }) => `${method} ${path}`)).toEqual(['GET settings', 'PUT settings/source:feishu', 'GET state', 'GET state', 'GET settings',
-      'PUT settings/policy', 'PUT settings/eval', 'PUT settings/executor', 'GET prompts', 'PUT prompts'])
+      'PUT settings/policy', 'PUT settings/eval', 'PUT settings/executor', 'GET prompts', 'PUT prompts', 'POST policy-sync/feishu'])
     expect(seen.every(request => request.header === '1')).toBe(true)
     // The first save uses the revision read before the restart; the later ones those read after it.
     expect(seen.filter(request => request.method === 'PUT').map(request => request.body!.revision ?? request.body!.baseRevision)).toEqual([2, 13, 14, 15, 7])
-    expect(seen.at(-1)!.body!.config).toMatchObject({ skills: { 'oncall-alerts': expect.any(String) }, overrides: { 'runtime/worker': { text: expect.any(String) } } })
-    expect(seen.at(-1)!.body!.config).toHaveProperty(['overrides', 'runtime/worker', 'base'],
+    const prompts = seen.find(request => request.method === 'PUT' && request.path === 'prompts')!
+    expect(prompts.body!.config).toMatchObject({ skills: { 'oncall-alerts': expect.any(String) }, overrides: { 'runtime/worker': { text: expect.any(String) } } })
+    expect(prompts.body!.config).toHaveProperty(['overrides', 'runtime/worker', 'base'],
       JSON.parse(readFileSync(join(KIT, 'overrides', 'bases.json'), 'utf8'))['runtime/worker'])
   }, 20_000)
 

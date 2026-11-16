@@ -94,7 +94,7 @@ it('lists the description, regions and topic names that route an alert, never to
     `MONITOR_SECRET_ID=${SECRET_ID}`, `MONITOR_SECRET_KEY=${SECRET_KEY}`, 'MONITOR_REGION=ap-singapore',
     'DESCRIPTION=Production, Singapore; Prometheus groups example_alerts_*'])
   const result = await run(['envs'])
-  expect(JSON.parse(result.stdout).envs).toEqual([{ name: 'prod-a', tools: ['cls', 'monitor'],
+  expect(JSON.parse(result.stdout).envs).toEqual([{ name: 'prod-a', tools: ['cls', 'monitor', 'cdb'],
     description: 'Production, Singapore; Prometheus groups example_alerts_*', clsRegion: 'ap-singapore', clsTopics: ['apiserver', 'gateway'],
     monitorRegion: 'ap-singapore' }])
   for (const hidden of [SECRET_ID, SECRET_KEY, '11111111', '22222222', '33333333']) expect(result.stdout + result.stderr).not.toContain(hidden)
@@ -280,6 +280,44 @@ it.each([
   expect(result).toMatchObject({ code: 2, stderr: expect.stringMatching(/^refused:/) })
   expect(requests).toHaveLength(0)
 })
+const cdbConfig = (url: string) => config('prod', [`MONITOR_SECRET_ID=${SECRET_ID}`, `MONITOR_SECRET_KEY=${SECRET_KEY}`,
+  'MONITOR_REGION=na-ashburn', `CDB_ENDPOINT=${url}`])
+const slowLog = (extra: Record<string, unknown> = {}) => JSON.stringify({ InstanceId: 'cdbro-test0001', StartTime: 1762800000,
+  EndTime: 1762800000 + 3600, Limit: 100, ...extra })
+it('reads a slow log with service cdb, masks SQL literals and connection details, and ranks the statements', async () => {
+  const item = (sql: string, time: number, rows: number) => ({ SqlText: sql, QueryTime: time, RowsExamined: rows, Database: 'app',
+    UserHost: '10.0.0.9', UserName: 'reporter', Md5: 'abc' })
+  cdbConfig(await serve({ Response: { RequestId: 'c1', TotalCount: 3, Items: [
+    item("SELECT * FROM t WHERE org_id = 'org-secret-1' AND n > 42", 2.5, 100),
+    item("SELECT * FROM t WHERE org_id = 'org-secret-2' AND n > 7", 3, 200),
+    item('UPDATE nothing', 9, 1)] } }))
+  const result = await run(['cdb', '--env', 'prod', '--action', 'DescribeSlowLogData', '--params', slowLog()])
+  expect(result.code, result.stderr).toBe(0)
+  const request = requests[0]!
+  expect(request.headers).toMatchObject({ 'x-tc-action': 'DescribeSlowLogData', 'x-tc-version': '2017-03-20', 'x-tc-region': 'na-ashburn' })
+  expect(request.headers.authorization).toBe(tc3(request, 'cdb'))
+  const output = JSON.parse(result.stdout)
+  expect(output.response.Items[0]).toEqual({ SqlText: 'SELECT * FROM t WHERE org_id = ? AND n > ?', QueryTime: 2.5, RowsExamined: 100, Database: 'app' })
+  expect(output.response.Summary).toEqual([
+    { SqlText: 'UPDATE nothing', Count: 1, QueryTime: 9, RowsExamined: 1, Database: 'app' },
+    { SqlText: 'SELECT * FROM t WHERE org_id = ? AND n > ?', Count: 2, QueryTime: 5.5, RowsExamined: 300, Database: 'app' }])
+  for (const hidden of ['org-secret', '10.0.0.9', 'reporter', SECRET_KEY]) expect(result.stdout + result.stderr).not.toContain(hidden)
+})
+it('lists instances with only their ids, names, type and size', async () => {
+  cdbConfig(await serve({ Response: { RequestId: 'c2', TotalCount: 1, Items: [{ InstanceId: 'cdbro-test0001', InstanceName: 'app_ro',
+    InstanceType: 3, Status: 1, Vip: '10.0.0.8', Vport: 3306, UniqVpcId: 'vpc-x', MasterInfo: { InstanceId: 'cdb-test0002', Region: 'x' } }] } }))
+  const output = JSON.parse((await run(['cdb', '--env', 'prod', '--action', 'DescribeDBInstances', '--params', '{"Limit":10}'])).stdout)
+  expect(output.response.Items).toEqual([{ InstanceId: 'cdbro-test0001', InstanceName: 'app_ro', InstanceType: 3, Status: 1, MasterInstanceId: 'cdb-test0002' }])
+})
+it.each([
+  ['ModifyDBInstanceName', '{}'], ['DescribeSlowLogData', slowLog({ InstanceId: 'x; drop' })],
+  ['DescribeSlowLogData', slowLog({ EndTime: 1762800000 + 25 * 3600 })], ['DescribeSlowLogData', slowLog({ Limit: 500 })],
+  ['DescribeSlowLogData', JSON.stringify({ InstanceId: 'cdbro-test0001' })], ['DescribeDBInstances', '{"Limit":1000}'],
+])('refuses cdb %s %s without a request', async (action, params) => {
+  cdbConfig(await serve({ Response: { RequestId: 'c3' } }))
+  expect(await run(['cdb', '--env', 'prod', '--action', action, '--params', params])).toMatchObject({ code: 2, stderr: expect.stringMatching(/^refused:/) })
+  expect(requests).toHaveLength(0)
+})
 it('refuses a malformed monitor region without a request', async () => {
   monitorConfig(await serve({ Response: { RequestId: 'm4' } }))
   const result = await run(['monitor', '--env', 'prod', '--action', 'DescribeBaseMetrics', '--params', '{"Namespace":"QCE/CDB"}',
@@ -371,7 +409,7 @@ it('lists monitor and prom only for complete configurations', async () => {
   config('c', [`MONITOR_SECRET_ID=${SECRET_ID}`, `MONITOR_SECRET_KEY=${SECRET_KEY}`, 'PROM_URL=https://prom.example',
     `CLS_SECRET_ID=${SECRET_ID}`, `CLS_SECRET_KEY=${SECRET_KEY}`, 'CLS_REGION=na-ashburn'])
   const result = await run(['envs'])
-  expect(JSON.parse(result.stdout).envs).toEqual([expect.objectContaining({ name: 'a', tools: ['monitor', 'prom'] }),
+  expect(JSON.parse(result.stdout).envs).toEqual([expect.objectContaining({ name: 'a', tools: ['monitor', 'cdb', 'prom'] }),
     expect.objectContaining({ name: 'b', tools: ['grafana', 'prom'] }), expect.objectContaining({ name: 'c', tools: ['cls'], clsRegion: 'na-ashburn' })])
   for (const secret of [SECRET_ID, SECRET_KEY, GRAFANA_TOKEN, PROM_TOKEN]) expect(result.stdout + result.stderr).not.toContain(secret)
 })

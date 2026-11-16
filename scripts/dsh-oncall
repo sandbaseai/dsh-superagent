@@ -30,10 +30,12 @@ import urllib.request
 ENV_NAME = re.compile(r'^[a-z0-9][a-z0-9-]{0,30}$')
 KNOWN_KEYS = {'DESCRIPTION', 'CLS_SECRET_ID', 'CLS_SECRET_KEY', 'CLS_REGION', 'CLS_TOPIC_ID', 'CLS_TOPICS', 'CLS_ENDPOINT', 'KUBECONFIG',
               'KUBE_CONTEXT', 'KUBE_NAMESPACE', 'KUBECTL', 'GRAFANA_BASE_URL', 'GRAFANA_TOKEN', 'MONITOR_SECRET_ID',
-              'MONITOR_SECRET_KEY', 'MONITOR_REGION', 'MONITOR_ENDPOINT', 'PROM_URL', 'PROM_USER', 'PROM_TOKEN', 'GRAFANA_PROM_UID'}
+              'MONITOR_SECRET_KEY', 'MONITOR_REGION', 'MONITOR_ENDPOINT', 'CDB_ENDPOINT', 'PROM_URL', 'PROM_USER', 'PROM_TOKEN', 'GRAFANA_PROM_UID'}
 SECRET_KEYS = ('CLS_SECRET_ID', 'CLS_SECRET_KEY', 'GRAFANA_TOKEN', 'MONITOR_SECRET_ID', 'MONITOR_SECRET_KEY', 'PROM_TOKEN')
 GROUPS = {'cls': ('CLS_SECRET_ID', 'CLS_SECRET_KEY', 'CLS_REGION'), 'kube': ('KUBECONFIG', 'KUBE_CONTEXT', 'KUBE_NAMESPACE'),
-          'grafana': ('GRAFANA_BASE_URL', 'GRAFANA_TOKEN'), 'monitor': ('MONITOR_SECRET_ID', 'MONITOR_SECRET_KEY', 'MONITOR_REGION')}
+          'grafana': ('GRAFANA_BASE_URL', 'GRAFANA_TOKEN'), 'monitor': ('MONITOR_SECRET_ID', 'MONITOR_SECRET_KEY', 'MONITOR_REGION'),
+          # TencentDB reads use the Cloud Monitor credentials: the same read-only sub-account.
+          'cdb': ('MONITOR_SECRET_ID', 'MONITOR_SECRET_KEY', 'MONITOR_REGION')}
 # `prom` is reported when either of these key sets is complete (see prom_base).
 PROM_GROUPS = (('PROM_URL', 'PROM_TOKEN'), ('GRAFANA_BASE_URL', 'GRAFANA_TOKEN', 'GRAFANA_PROM_UID'))
 MAX_OUTPUT = 200 * 1024
@@ -450,6 +452,107 @@ def command_monitor(args):
     return 0
 
 
+# ---- cdb ----
+
+CDB_ACTIONS = ('DescribeDBInstances', 'DescribeSlowLogData')
+INSTANCE = re.compile(r'^cdb(ro)?-[a-z0-9]{8}$')
+# Literals in a SQL text: quoted strings, hex and numbers. A slow log holds the statements as sent, with customer data in them.
+SQL_LITERAL = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"|\b0x[0-9a-fA-F]+\b|\b\d+(?:\.\d+)?\b")
+
+
+def mask_sql(text):
+    """Replace the literals of a SQL text with `?`, keeping its shape: which tables, columns and conditions."""
+    return SQL_LITERAL.sub('?', text) if isinstance(text, str) else text
+
+
+def slow_summary(items):
+    """The masked statements of a slow-log page ranked by total query time: how often each ran, its time and rows examined."""
+    groups = {}
+    for item in items:
+        text = re.sub(r'\s+', ' ', str(item.get('SqlText') or '')).strip()[:300]
+        group = groups.setdefault(text, {'SqlText': text, 'Count': 0, 'QueryTime': 0.0, 'RowsExamined': 0, 'Database': item.get('Database')})
+        group['Count'] += 1
+        group['QueryTime'] += float(item.get('QueryTime') or 0)
+        group['RowsExamined'] += int(item.get('RowsExamined') or 0)
+    ranked = sorted(groups.values(), key=lambda group: -group['QueryTime'])[:10]
+    for group in ranked:
+        group['QueryTime'] = round(group['QueryTime'], 3)
+    return ranked
+
+
+def check_cdb(action, params):
+    """Refuse an action outside the read allow list, an instance id that is not one, and an over-wide window or page."""
+    if action not in CDB_ACTIONS:
+        raise Refused('refused: cdb action ' + str(action) + ' is not one of ' + ', '.join(CDB_ACTIONS))
+    if action == 'DescribeDBInstances':
+        limit = params.get('Limit', 20)
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+            raise Refused('refused: DescribeDBInstances allows Limit 1-100')
+        return
+    if not INSTANCE.match(str(params.get('InstanceId', ''))):
+        raise Refused('refused: ' + action + ' needs an InstanceId such as cdb-xxxxxxxx (DescribeDBInstances lists them)')
+    start_key, end_key = 'StartTime', 'EndTime'
+    start, end = params.get(start_key), params.get(end_key)
+    if not all(isinstance(v, int) and not isinstance(v, bool) for v in (start, end)) or not 0 < end - start <= 86400:
+        raise Refused('refused: ' + action + ' needs ' + start_key + ' and ' + end_key + ' in epoch seconds, at most 24 h apart')
+    limit = params.get('Limit', 20)
+    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+        raise Refused('refused: ' + action + ' allows Limit 1-100')
+
+
+def command_cdb(args):
+    """Call one read-only TencentDB for MySQL action with the Cloud Monitor credentials and print its masked Response."""
+    if len(args.params.encode('utf-8')) > MAX_PARAMS:
+        raise Refused('refused: --params must be at most 8 KiB')
+    try:
+        params = json.loads(args.params)
+    except ValueError:
+        raise Refused('refused: --params must be a JSON object')
+    if not isinstance(params, dict):
+        raise Refused('refused: --params must be a JSON object')
+    check_cdb(args.action, params)
+    values = load(args.env)
+    require(values, args.env, 'MONITOR_SECRET_ID', 'MONITOR_SECRET_KEY', 'MONITOR_REGION')
+    region = args.region or values['MONITOR_REGION']
+    if not REGION.match(region):
+        raise Refused('refused: region ' + region + ' does not match ^[a-z]+-[a-z]+(-[0-9]+)?$')
+    url, host = endpoint(values, 'CDB_ENDPOINT', 'https://cdb.tencentcloudapi.com')
+    body = json.dumps(params, ensure_ascii=False).encode('utf-8')
+    content_type = 'application/json; charset=utf-8'
+    timestamp = int(time.time())
+    headers = {'Content-Type': content_type, 'Host': host, 'X-TC-Action': args.action, 'X-TC-Version': '2017-03-20',
+               'X-TC-Timestamp': str(timestamp), 'X-TC-Region': region,
+               'Authorization': tc3_authorization(values['MONITOR_SECRET_ID'], values['MONITOR_SECRET_KEY'], host, content_type,
+                                                  body, timestamp, 'cdb')}
+    status, text = request(url, data=body, headers=headers, method='POST')
+    answer = parse_json(text)
+    response = answer.get('Response') if isinstance(answer, dict) else None
+    if not isinstance(response, dict):
+        raise Failed('TencentDB answered HTTP ' + str(status) + ' without a Response: ' + cut(text, 500)[0])
+    request_id = response.pop('RequestId', None)
+    if response.get('Error'):
+        error = response['Error']
+        emit({'error': {'code': error.get('Code'), 'message': error.get('Message')}, 'requestId': request_id})
+        return 1
+    if args.action == 'DescribeDBInstances':
+        # Only what an investigation needs: no addresses, accounts or network ids.
+        keep = ('InstanceId', 'InstanceName', 'InstanceType', 'Status', 'Region', 'Zone', 'EngineVersion', 'Memory', 'Volume',
+                'Qps', 'Cpu', 'MasterInfo', 'DeviceType', 'CreateTime')
+        response['Items'] = [{key: item[key] for key in keep if key in item and key != 'MasterInfo'}
+                             | ({'MasterInstanceId': item['MasterInfo'].get('InstanceId')} if isinstance(item.get('MasterInfo'), dict) else {})
+                             for item in response.get('Items') or []]
+    for item in response.get('Items') or []:
+        for key in ('SqlText', 'SqlTemplate'):
+            if key in item:
+                item[key] = mask_sql(item[key])
+        for key in ('Host', 'UserHost', 'UserName', 'Md5'):
+            item.pop(key, None)
+    if args.action == 'DescribeSlowLogData':
+        response['Summary'] = slow_summary(response.get('Items') or [])
+    emit(shrink({'action': args.action, 'region': region, 'requestId': request_id, 'response': response}, 'response'))
+    return 0
+
+
 # ---- prom ----
 
 PROM_COMMANDS = {'query': 'query', 'range': 'query_range', 'series': 'series', 'labels': 'labels', 'label-values': None,
@@ -787,6 +890,7 @@ USAGE = """usage:
   dsh-oncall kube --env E <kubectl read args...>
   dsh-oncall monitor --env E --action GetMonitorData|DescribeAlarmHistories|DescribeBaseMetrics|DescribeAlarmPolicies
                      --params '<JSON object>' [--region ap-singapore]
+  dsh-oncall cdb --env E --action DescribeDBInstances|DescribeSlowLogData --params '<JSON object>'
   dsh-oncall prom --env E query --query Q [--time now]
   dsh-oncall prom --env E range --query Q [--from -1h] [--to now] [--step 60]
   dsh-oncall prom --env E series --match M [--match M ...] [--from -1h] [--to now]
@@ -797,7 +901,9 @@ USAGE = """usage:
 Times: now, -15m/-2h/-1d, epoch milliseconds or ISO-8601. prom range is at most 7 days (step raised to at least
 max(15, range/1100) seconds, so 7 days gives 550 s or more); series, labels and label-values windows at most 6 h. monitor GetMonitorData takes
 StartTime/EndTime as ISO-8601 at most 24 h apart and Period >= 60; DescribeAlarmHistories takes StartTime/EndTime in
-epoch seconds at most 7 days apart and PageSize <= 100.
+epoch seconds at most 7 days apart and PageSize <= 100. cdb uses the monitor credentials; DescribeSlowLogData takes
+InstanceId, StartTime/EndTime in epoch seconds at most 24 h apart and Limit <= 100, masks SQL literals and adds a Summary
+of the statements ranked by total query time.
 """
 
 
@@ -863,18 +969,18 @@ def run(argv):
         if rest:
             raise Refused('refused: envs takes no arguments')
         return command_envs(None)
-    if command not in ('cls', 'monitor', 'prom', 'kube', 'grafana'):
+    if command not in ('cls', 'monitor', 'cdb', 'prom', 'kube', 'grafana'):
         raise Refused('refused: unknown command ' + command + '\n' + USAGE)
     env, rest = take_env(rest)
     if command == 'kube':
         return command_kube(env, rest[1:] if rest[:1] == ['--'] else rest)
-    if command == 'monitor':
+    if command in ('monitor', 'cdb'):
         options = parse_options(rest, {'--action': ('action', None, str), '--params': ('params', '{}', str),
                                        '--region': ('region', None, str)})
         if not options.action:
-            raise Refused('refused: monitor needs --action\n' + USAGE)
+            raise Refused('refused: ' + command + ' needs --action\n' + USAGE)
         options.env = env
-        return command_monitor(options)
+        return command_monitor(options) if command == 'monitor' else command_cdb(options)
     if command == 'prom':
         sub, rest = (rest[0], rest[1:]) if rest else (None, [])
         if sub not in PROM_COMMANDS:
