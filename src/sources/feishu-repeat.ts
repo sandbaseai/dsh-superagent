@@ -9,6 +9,7 @@ import { feishuRef, SOURCE } from './feishu-trigger.ts'
 import type { SourceContext } from './host.ts'
 import { KV } from '../kv.ts'
 import type { FeishuConfig } from './feishu.ts'
+import { IM_WORDS, wordCount, wordPrefix } from '../infra/text.ts'
 
 const CONCLUSION_CHARS = 160
 
@@ -52,11 +53,14 @@ export async function repeatNotice(ctx: SourceContext, trigger: Trigger, config:
   const link = source ? await readFeishuLink(ctx.commands.withSignal(signal), source).catch(() => undefined) : undefined
   const conclusion = conclusionOf(latestReport(earlier)?.summary ?? '')
   const time = clock(earlier.createdAt, brand)
-  const text = brand === 'lark'
+  const lines = (conclusion: string | undefined) => (brand === 'lark'
     ? [`Same alarm as the one analysed at ${time} UTC; it is not investigated again within ${config.repeatWindowHours} h.`,
       ...conclusion ? [`**Earlier conclusion**: ${conclusion}`] : [], ...link ? [`[Full analysis](${link})`] : []]
     : [`同一告警 ${time} 已分析过，${config.repeatWindowHours} 小时内不再重复排查。`,
-      ...conclusion ? [`**上次结论**: ${conclusion}`] : [], ...link ? [`[查看完整分析](${link})`] : []]
-  ctx.notify({ id: key('repeat-notice', trigger.id), channel: trigger.channel, text: text.join('\n'), kind: 'notice', ticketId: earlier.id })
+      ...conclusion ? [`**上次结论**: ${conclusion}`] : [], ...link ? [`[查看完整分析](${link})`] : []]).join('\n')
+  // The link URL counts toward the IM limit, so the conclusion gets the words the rest of the notice leaves.
+  const room = IM_WORDS - (wordCount(lines('x')) - 1)
+  const text = lines(conclusion && room > 0 ? wordPrefix(conclusion, room) : undefined)
+  ctx.notify({ id: key('repeat-notice', trigger.id), channel: trigger.channel, text, kind: 'notice', ticketId: earlier.id })
   ctx.state.set(sentKey, trigger.at)
 }

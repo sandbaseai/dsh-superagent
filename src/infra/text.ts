@@ -8,6 +8,14 @@ export function wordCount(text: string): number {
   for (const segment of words.segment(text)) if (segment.isWordLike) count++
   return count
 }
+/** The start of `text` up to and including its `limit`-th word, with `…` when words were cut. */
+export function wordPrefix(text: string, limit: number): string {
+  let count = 0
+  for (const segment of words.segment(text)) {
+    if (segment.isWordLike && ++count > limit) return `${text.slice(0, segment.index).trimEnd()}…`
+  }
+  return text
+}
 /** Validates that an outgoing IM Markdown message does not exceed `IM_WORDS` (link labels and URLs both count toward the limit). */
 export function checkedImText(text: string): string {
   const count = wordCount(text)

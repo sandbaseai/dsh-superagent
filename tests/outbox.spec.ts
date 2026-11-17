@@ -3,6 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import type { OutboundMessage } from '../src/core/index.ts'
 import { Commands } from '../src/infra/commands.ts'
+import { IM_WORDS } from '../src/infra/text.ts'
 import type { SourceKind } from '../src/sources/kind.ts'
 import { feishu, startRuntime, type Host } from './fixtures/host.ts'
 
@@ -25,6 +26,21 @@ it('holds every message while processing is paused, and sends it once processing
   await h.runtime.pump(); await h.runtime.sendReplies()
   expect(h.runtime.outbox.status('held')).toBe('sent')
   expect(JSON.stringify(lark.mock.calls)).toContain('已合并。')
+})
+
+it('refuses a Feishu notice over the IM limit, and drops one queued earlier instead of retrying it', async () => {
+  const channel = feishu('1', 'x').channel!
+  const long = Array.from({ length: IM_WORDS + 1 }, (_, i) => `w${i}`).join(' ')
+  expect(() => h.runtime.outbox.send({ id: 'refused', channel, text: long, kind: 'notice' })).toThrow(`maximum is ${IM_WORDS}`)
+  h.runtime.store.receipts.add({ id: 'stale', channel, text: long, kind: 'notice' })
+  h.runtime.effects.enqueue('reply', 'stale', {})
+  h.runtime.outbox.send({ id: 'next', channel, text: '已合并。', kind: 'notice' })
+  const lark = vi.mocked(Commands.prototype.lark)
+  lark.mockClear()
+  await h.runtime.pump(); await h.runtime.sendReplies()
+  expect([h.runtime.outbox.status('refused'), h.runtime.store.receipts.get('stale')?.dropped?.reason, h.runtime.outbox.status('next')]).toEqual([undefined, 'tooLong', 'sent'])
+  expect(JSON.stringify(lark.mock.calls)).not.toContain('w100')
+  expect(h.runtime.health.reply?.state).toBe('ready')
 })
 
 it('keeps a message for a Source that is not installed waiting, and sends it once the Source\'s kind registers', async () => {
