@@ -4,6 +4,7 @@ import { z } from 'zod'
 import type { OutboundMessage } from '../src/core/index.ts'
 import { Commands } from '../src/infra/commands.ts'
 import { IM_WORDS } from '../src/infra/text.ts'
+import type { Store } from '../src/app/store.ts'
 import type { SourceKind } from '../src/sources/kind.ts'
 import { feishu, startRuntime, type Host } from './fixtures/host.ts'
 
@@ -28,18 +29,28 @@ it('holds every message while processing is paused, and sends it once processing
   expect(JSON.stringify(lark.mock.calls)).toContain('已合并。')
 })
 
-it('refuses a Feishu notice over the IM limit, and drops one queued earlier instead of retrying it', async () => {
+it('refuses a Feishu notice over the IM limit', () => {
+  const long = Array.from({ length: IM_WORDS + 1 }, (_, i) => `w${i}`).join(' ')
+  expect(() => h.runtime.outbox.send({ id: 'refused', channel: feishu('1', 'x').channel!, text: long, kind: 'notice' })).toThrow(`maximum is ${IM_WORDS}`)
+  expect(h.runtime.outbox.status('refused')).toBeUndefined()
+})
+
+it('drops on start a Feishu message over the IM limit that an earlier version queued, and sends the one behind it', async () => {
   const channel = feishu('1', 'x').channel!
   const long = Array.from({ length: IM_WORDS + 1 }, (_, i) => `w${i}`).join(' ')
-  expect(() => h.runtime.outbox.send({ id: 'refused', channel, text: long, kind: 'notice' })).toThrow(`maximum is ${IM_WORDS}`)
-  h.runtime.store.receipts.add({ id: 'stale', channel, text: long, kind: 'notice' })
-  h.runtime.effects.enqueue('reply', 'stale', {})
-  h.runtime.outbox.send({ id: 'next', channel, text: '已合并。', kind: 'notice' })
-  const lark = vi.mocked(Commands.prototype.lark)
-  lark.mockClear()
+  const queue = (store: Store, id: string, text: string, attempts: number) => {
+    store.receipts.add({ id, channel, text, kind: 'notice', ticketId: 't1' })
+    store.db.prepare("INSERT INTO effect (kind, key, value, seq, due, since, attempts, error) VALUES ('reply', ?, '{}', ?, 0, ?, ?, 'Error: IM message has 101 words')")
+      .run(id, attempts + 1, new Date().toISOString(), attempts)
+  }
+  await h.stop()
+  h = await startRuntime(store => { queue(store, 'stale', long, 40); queue(store, 'next', '已合并。', 0) })
+  expect([h.runtime.store.receipts.get('stale')?.dropped?.reason, h.runtime.health.reply?.state]).toEqual(['tooLong', 'ready'])
   await h.runtime.pump(); await h.runtime.sendReplies()
-  expect([h.runtime.outbox.status('refused'), h.runtime.store.receipts.get('stale')?.dropped?.reason, h.runtime.outbox.status('next')]).toEqual([undefined, 'tooLong', 'sent'])
-  expect(JSON.stringify(lark.mock.calls)).not.toContain('w100')
+  // The Feishu Source may still be starting at the first attempt, which tries again after 5 seconds.
+  await at(5000)
+  expect([h.runtime.store.receipts.get('stale')?.dropped?.reason, h.runtime.outbox.status('next')]).toEqual(['tooLong', 'sent'])
+  expect(JSON.stringify(vi.mocked(Commands.prototype.lark).mock.calls)).not.toContain('w100')
   expect(h.runtime.health.reply?.state).toBe('ready')
 })
 
