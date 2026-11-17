@@ -30,6 +30,16 @@ beforeEach(async () => {
     const url = new URL(request.url!, 'http://x')
     listed.push(`${url.pathname}?${url.searchParams}`)
     if (request.headers['x-orchestrator-request'] !== '1') { response.writeHead(403); response.end(); return }
+    if (url.pathname.endsWith('/state')) {
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ setup: { accounts: { feishu: { appId: 'cli_ours' } } } })); return
+    }
+    const detail = /\/tickets\/(\w+)$/.exec(url.pathname)
+    if (detail) {
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ channels: [{ source: 'feishu', address: { chatId: 'oc_alerts', messageId: `om_${detail[1]!.slice(0, 8)}` } }] }))
+      return
+    }
     const items = url.searchParams.get('state') === 'ended' ? TICKETS : []
     const offset = Number(url.searchParams.get('offset')), limit = 1
     response.writeHead(200, { 'content-type': 'application/json' })
@@ -39,7 +49,29 @@ beforeEach(async () => {
   await new Promise<void>(resolve => api!.listen(0, '127.0.0.1', resolve))
   apiUrl = `http://127.0.0.1:${(api!.address() as AddressInfo).port}`
   writeFileSync(join(root, 'credentials.yaml'), `version: 1\nrefs:\n  ONCALL_LLM_API_KEY: "${KEY}"\n`)
-  writeFileSync(join(root, 'lark'), `#!/bin/sh\necho "$@" >> ${JSON.stringify(join(root, 'sends.log'))}\ncat digest.md >> ${JSON.stringify(join(root, 'sent.md'))}\n`, { mode: 0o755 })
+  // The stub lark-cli sends by recording, and answers the topic and reaction reads: aaaaaaaa's reply has two people's 👍 and the
+  // bot's own, cccccccc's one person's 👎; the alert bot's message in the topic is not the agent's reply.
+  writeFileSync(join(root, 'lark'), `#!/usr/bin/env python3
+import json, os, re, sys
+args = sys.argv[1:]
+root = ${JSON.stringify(root)}
+if os.path.exists(os.path.join(root, 'lark-fails')) and args[0] == 'api': sys.exit(1)
+if args[0] != 'api':
+    open(os.path.join(root, 'sends.log'), 'a').write(' '.join(args) + '\\n')
+    open(os.path.join(root, 'sent.md'), 'a').write(open('digest.md').read())
+    sys.exit(0)
+path = args[2]
+def answer(data): print(json.dumps({'ok': True, 'data': data})); sys.exit(0)
+m = re.fullmatch(r'/open-apis/im/v1/messages/om_(\\w{8})', path)
+if m: answer({'items': [{'thread_id': 'omt_' + m.group(1)}]})
+if path == '/open-apis/im/v1/messages':
+    topic = json.loads(args[args.index('--params') + 1])['container_id'][4:]
+    answer({'items': [{'message_id': 'om_alert', 'sender': {'id': 'cli_alerts'}}, {'message_id': 'om_r' + topic, 'sender': {'id': 'cli_ours'}}]})
+m = re.fullmatch(r'/open-apis/im/v1/messages/om_r(\\w{8})/reactions', path)
+user = lambda emoji, kind='user': {'reaction_type': {'emoji_type': emoji}, 'operator': {'operator_type': kind}}
+reactions = {'aaaaaaaa': [user('THUMBSUP'), user('THUMBSUP'), user('THUMBSUP', 'app')], 'cccccccc': [user('ThumbsDown')]}
+answer({'items': reactions.get(m.group(1), []) if m else []})
+`, { mode: 0o755 })
   seen = []
 })
 afterEach(() => { server?.close(); server = undefined; api?.close(); api = undefined; rmSync(root, { recursive: true, force: true }) })
@@ -91,8 +123,11 @@ it('groups the window\'s tickets through the gateway, posts the digest and write
   expect(readFileSync(join(root, 'known.md'), 'utf8')).toContain('**provider-a 计费停用**（`provider-a-billing`，需要人处理，2 张工单')
   expect(readFileSync(join(root, 'sends.log'), 'utf8')).toBe('im +messages-send --chat-id oc_digest --markdown @digest.md --as bot\n')
   expect(result.stdout + result.stderr).not.toContain(KEY)
-  // The last page it read held the first ticket older than the window; nothing after it was read.
-  expect(listed.filter(path => path.includes('state=ended'))).toHaveLength(4)
+  // Each of the two reads (the window, then the feedback window) stopped there; nothing after it was read.
+  expect(listed.filter(path => path.includes('state=ended'))).toHaveLength(8)
+  expect(listed).not.toContain('/orchestrator/api/tickets?state=ended&offset=4&limit=200')
+  expect(sent).toContain('**分析反馈**（过去 48 小时 3 张工单，2 张有反馈）：👍 2 · 👎 1')
+  expect(sent).toContain('- 👎 404 · /old（')
   // The next run passes the known list to the model and adds to the same key's count.
   await digest(await gateway(answer))
   expect(seen.at(-1)!.body.messages[0]!.content).toContain('provider-a-billing')
@@ -122,4 +157,12 @@ it('refuses a bad chat, a missing model or a non-loopback API before reading any
   expect(await digest(base, '--model', '')).toMatchObject({ code: 2, stderr: expect.stringContaining('--model are required') })
   expect(seen).toHaveLength(0)
   expect(listed).toHaveLength(0)
+})
+
+it('posts the digest without feedback when Feishu reads fail', async () => {
+  writeFileSync(join(root, 'lark-fails'), '')
+  const result = await digest(await gateway(answer))
+  expect(result.code, result.stderr).toBe(0)
+  expect(result.stderr).toContain('feedback not read')
+  expect(readFileSync(join(root, 'sent.md'), 'utf8')).toContain('**分析反馈**：这次没读到')
 })

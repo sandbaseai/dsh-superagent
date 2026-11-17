@@ -1,6 +1,6 @@
 {
   "mode": "observe",
-  "timeoutSeconds": 120,
+  "timeoutSeconds": 300,
   "model": {
     "provider": "anthropic-gateway",
     "model": "<router model id>"

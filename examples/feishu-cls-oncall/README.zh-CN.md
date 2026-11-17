@@ -270,7 +270,7 @@ worker 可以用 `dsh-oncall prom --env <env> chart --query ... --title ... --ou
 
 ## 工单日报和已知问题
 
-`scripts/oncall-ticket-digest` 每天汇总一次过去 24 小时的工单。它通过 dsh-superagent 的管理 API 读取工单（标题和报告里的结论），不直接打开数据库，请模型按根因把工单归类，并和已有的「已知问题」对应起来，然后：
+`scripts/oncall-ticket-digest` 每天汇总一次过去 24 小时的工单。它通过 dsh-superagent 的管理 API 读取工单（标题和报告里的结论），不直接打开数据库。日报还统计最近 48 小时（`--feedback-hours`）每张工单的分析回复上有多少人点了 👍、👎，列出被点 👎 的工单，用来判断分析准不准；需要机器人能读消息的表情回应，请模型按根因把工单归类，并和已有的「已知问题」对应起来，然后：
 - 把日报发到告警群：先列需要人处理的问题（多少张工单、该找谁、建议做什么），再列无需处理的。
 - 更新已知问题清单 `~/.config/dsh-oncall/known-issues.json`，同时写一份 `known-issues.md`。两天没有新工单的问题标为安静，一周后从清单里移除。
 
