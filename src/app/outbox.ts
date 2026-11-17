@@ -1,7 +1,7 @@
 /** Reliable outbound message delivery backed by persistent receipts and retried reply effects. */
 import type { OutboundMessage, Outbox as OutboxPort, ReplyStatus } from '../core/index.ts'
 import type { Commands } from '../infra/commands.ts'
-import { checkedImText } from '../infra/text.ts'
+import { checkedImText, IM_WORDS, wordCount } from '../infra/text.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
 import { FAILURES_BEFORE_ERROR, Later, type Effects } from './effects.ts'
 import type { Store } from './store.ts'
@@ -27,8 +27,7 @@ export class Outbox implements OutboxPort {
   }
   /** Record a message receipt and enqueue its delivery effect atomically; duplicate message IDs are ignored. */
   send(message: OutboundMessage): void {
-    // Validate IM reply length here; acknowledgements are already validated when decided.
-    if (message.kind === 'reply' && message.channel.source === 'feishu') checkedImText(message.text)
+    if (message.channel.source === 'feishu') checkedImText(message.text)
     const { store, effects } = this.host
     store.atomic(() => { if (store.receipts.add(message)) effects.enqueue('reply', message.id, {}) })
   }
@@ -46,6 +45,8 @@ export class Outbox implements OutboxPort {
     // Hold later messages for the same ticket and conversation behind an earlier pending message until it exceeds the failure threshold.
     if (store.receipts.behind(id, FAILURES_BEFORE_ERROR)) throw new Later('An earlier message of this ticket to this conversation waits')
     if (!sources.channelAllowed(receipt.channel)) { store.receipts.settle(receipt, 'channelIgnored'); return }
+    // A message queued before the limit applied to it can never be sent; retrying it would only hold the queue.
+    if (receipt.channel.source === 'feishu' && wordCount(receipt.text) > IM_WORDS) { store.receipts.settle(receipt, 'tooLong'); return }
     // A permanently unreachable target (such as a recalled message or deleted Issue) settles as `channelGone` so its receipt prevents retries.
     const directory = receipt.ticketId ? this.host.ticketDirectory?.(receipt.ticketId) : undefined
     const result = await sources.send(receipt, commands, directory)

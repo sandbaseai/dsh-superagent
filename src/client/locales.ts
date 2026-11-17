@@ -601,6 +601,7 @@ const TEXT = {
   'reason.legacyImport': ['从旧版工单记录导入', 'Imported from a legacy Ticket record'],
   'reason.channelGone': ['对话已无法接收消息', 'The conversation can no longer receive messages'],
   'reason.channelIgnored': ['来源已不再监听这个对话', 'The Source no longer listens to this conversation'],
+  'reason.tooLong': ['消息超过 IM 字数上限', 'The message is longer than the IM limit'],
   'reason.hostRestarted': ['dsh-superagent 重启', 'dsh-superagent restarted'],
   'reason.retried': ['人工重试', 'Retried by a person'],
   'reason.completed': ['已完成', 'Completed'],

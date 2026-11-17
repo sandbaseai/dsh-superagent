@@ -6,6 +6,7 @@ import { KV } from '../src/kv.ts'
 import { apply as applyFeishu, pollThreads as pollFeishuThreads } from '../src/sources/feishu.ts'
 import { HISTORY_OVERLAP_MS, runFeishu } from '../src/sources/feishu-loops.ts'
 import { conclusionOf, repeatNotice } from '../src/sources/feishu-repeat.ts'
+import { IM_WORDS, wordCount } from '../src/infra/text.ts'
 import { ALERT_CHAT, qpsFiring, qpsOngoing, qpsRecovered } from './fixtures/tencent-alerts.ts'
 import { commentTrigger, githubAddress, githubChannel, issueTrigger, type GithubComment, type GithubIssue } from '../src/sources/github-trigger.ts'
 import { claimPull, observePull, pullEndNotices, pullOf, ticketBranch, type Pull } from '../src/sources/github-pull.ts'
@@ -257,6 +258,28 @@ describe('feishu source', () => {
     await repeatNotice(h, off, { repeatNoticeMinutes: 0, repeatWindowHours: 6 } as never)
     expect(notice(off)).toBeUndefined()
     expect(conclusionOf('**结论**\n多行\n结论\n**证据**: x')).toBe('多行 结论')
+    h.store.close()
+  })
+  it('cuts the earlier conclusion of a repeat notice so the notice with its link stays within the IM limit', async () => {
+    const h = host()
+    const start = Date.parse('2026-11-15T06:00:00Z')
+    const first = feishuTrigger(historyEvent({ ...qpsFiring, create_time: String(start) }, ALERT_CHAT, false), 'ou_bot', 'cli_bot')!
+    h.store.triggers.save(first)
+    const alertThread = first.threads[0]!
+    h.store.threads.save({ key: `feishu:${alertThread.id}`, ref: alertThread, createdAt: first.at, subscriptions: ['analysed'], correlated: [], pending: [], meta: {} })
+    const conclusion = Array.from({ length: 40 }, (_, i) => `pod-${i} OOM 重启`).join('，')
+    h.store.tickets.save({ ...openTicket('analysed'), createdAt: first.at, origin: { triggerId: first.id, triggerIds: [first.id] },
+      ended: { at: first.at, by: 'executor', outcome: 'completed' },
+      assignments: [{ id: 'a1', state: 'ended', report: { state: 'ready', summary: `**结论**: ${conclusion}`, at: first.at } } as never] })
+    vi.spyOn(h.commands, 'withSignal').mockReturnValue(h.commands)
+    const link = 'https://applink.feishu.cn/client/message/link/open?token=AmZ1a2Vfa2V5X2Zvcl90ZXN0aW5nX29ubHlfbm90X3JlYWw%3D'
+    vi.spyOn(h.commands, 'lark').mockResolvedValue({ messages: [{ message_id: 'om_qpsfiring', chat_id: ALERT_CHAT, message_app_link: link }] })
+    const again = feishuTrigger(historyEvent({ ...qpsOngoing, create_time: String(start + 600_000), message_id: `${qpsOngoing.message_id}-1` }, ALERT_CHAT, false), 'ou_bot', 'cli_bot')!
+    await repeatNotice(h, again, { repeatNoticeMinutes: 30, repeatWindowHours: 6 } as never)
+    const text = h.store.receipts.get(key('repeat-notice', again.id))!.text
+    expect(wordCount(text)).toBeLessThanOrEqual(IM_WORDS)
+    expect(text).toMatch(/\*\*上次结论\*\*: pod-0 OOM 重启.*…\n\[查看完整分析\]/)
+    expect(text.endsWith(`(${link})`)).toBe(true)
     h.store.close()
   })
   it('refuses a history page with a message outside its chat or topic, and a page token that does not advance', async () => {
