@@ -304,6 +304,22 @@ Check dsh-superagent: run `scripts/dsh-superagent --profile superagent status` i
 */5 * * * * cd $HOME && python3 $HOME/dsh-superagent/scripts/oncall-watchdog --url http://127.0.0.1:<port> --chat <oc_...> --lark-cli $HOME/.local/bin/lark-bot >> $HOME/oncall-watchdog.log 2>&1
 ```
 
+## 自动修复（可选）
+
+worker 确认一个靠改代码或配置就能解决的问题后，可以运行 `oncall-fix submit`：它在 SandBase Agents 上启动一个修复 Agent，由它在 GitHub 上开 PR；再由另一个审阅 Agent 读 PR，把阻塞问题写成 PR 评论，修复 Agent 按评论在同一分支上改，最多审阅两轮。审阅通过后**由人合并**。每一步需要人知道的结果都回复在告警所在的话题里。能改哪些仓库由 SandBase Agents 的 GitHub 授权决定，这个工具不另设名单；一张工单只发起一次。
+
+准备：
+
+1. 在 SandBase Console 建两个 Agent（修复、审阅），都绑定 GitHub 插件连接；审阅 Agent 不需要合并工具。两个 Agent 的提示词分别要求只开 PR、只提阻塞问题，可以从本仓库作者处参考。
+2. 在 `~/.config/dsh-oncall/fix.env`（600）写入 `SANDBASE_AGENTS_URL`（带 `/v1`）、`SANDBASE_API_KEY`、`FIX_AGENT_ID`、`REVIEW_AGENT_ID`、`MODEL_BASE_URL`（Anthropic 兼容网关根地址，不带 `/v1`）和 `MODEL_API_KEY`。两个 Agent 的会话都用这个网关的模型。
+3. `ln -sf "$PWD/scripts/oncall-fix" ~/.local/bin/oncall-fix`，并用 cron 每 5 分钟推进一次：
+
+```sh
+*/5 * * * * cd $HOME && python3 $HOME/dsh-superagent/scripts/oncall-fix tick --url http://127.0.0.1:<port> --lark-cli $HOME/.local/bin/lark-bot >> $HOME/oncall-fix.log 2>&1
+```
+
+`oncall-fix status` 列出所有修复和所处阶段；工单日报会统计过去 48 小时发起的修复，并列出等人合并和需要人看的 PR。
+
 ## 故障排查
 
 | 现象 | 原因与处理 |

@@ -87,3 +87,13 @@ Look for restarts and their reasons (OOMKilled, CrashLoopBackOff, failed probes)
 Keep the investigation proportionate: most alarms are settled within about 40 dsh-oncall calls. Ask one question per query: group by a label (`sum by (provider, status) (...)`) instead of one query per provider, and read a baseline with one 7-day `range` at a coarse step instead of several 24 h windows. Stop once two independent signals agree on a cause, such as a metric and the matching log lines, and write the conclusion. When about 15 queries in a row add nothing, stop too: conclude with what was found, 低 confidence and the open question in **未确认**, rather than querying on.
 
 Tie each conclusion to evidence: a QPS drop of provider A at 22:04 followed by the spike on provider B at 22:06 is evidence of a fallback shift; a deploy on the same day is not. Prefer one well-supported cause with 中 confidence over several guesses. Report ready with the reply in the Communication section's format (**结论**, **证据**, **影响**, **建议**, **未确认**) first, then the full evidence: each command or query exactly as run, its time range and its key numbers. Mask IPs as the Communication section says, and quote no hostnames, account ids or secrets beyond what the alert itself shows.
+
+## 7. Propose a fix
+
+Submit a fix only when all of these hold: two independent signals confirm the cause with 高 or 中 confidence; a small code or configuration change in one repository fixes it, such as a missing redirect or route, a wrong config value or copy, or a small bug; and it needs no product or design decision. Do not submit for a provider outage, a quota, billing, capacity, a data fix, an alert rule (those are changed in the cloud console), or anything that needs a rollback or deploy decision.
+
+Before submitting, run `oncall-fix status`: when a fix for the same problem is listed and has not ended as `failed` or `no_pr`, do not submit again; name that fix's pull request in your reply instead.
+
+Write the brief to a file in the ticket directory, in English, with four parts: **Problem** (what is wrong and since when), **Evidence** (Beijing times, counts, example requests or URLs, with IPs masked), **Change wanted** (what should change, not how), and **Out of scope**. Quote no secrets, hostnames or account ids beyond what the alert shows. Then run `oncall-fix submit --repository <owner/name> --brief <file>`. It starts a separate agent that opens a pull request, has it reviewed, and replies the pull request into this alert's topic; do not wait for it. In the reply's **建议**, say `已发起自动修复，PR 会回复在本话题。`
+
+List the repositories a fix may target, with what each serves, in your copy of this skill.
