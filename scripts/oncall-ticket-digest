@@ -12,6 +12,7 @@ Exit 0 posted (or printed with --dry-run), 1 the model, the management API or th
 """
 
 import argparse
+import concurrent.futures
 import datetime
 import json
 import os
@@ -26,6 +27,8 @@ import urllib.request
 CONCLUSION_CHARS = 400
 MAX_TICKETS = 150
 PAGE = 200
+UP = {'thumbsup'}
+DOWN = {'thumbsdown'}
 # A known issue with no ticket for this long is marked quiet; one quiet this long is dropped from the list.
 QUIET_HOURS = 48
 DROP_DAYS = 7
@@ -100,7 +103,8 @@ def read_tickets(url, since):
             for ticket in items:
                 at = parse_time(ticket['createdAt'])
                 if at >= since:
-                    tickets.append({'id': ticket['id'][:8], 'at': at.astimezone(SHANGHAI).strftime('%m-%d %H:%M'), 'title': ticket['title'][:160],
+                    tickets.append({'id': ticket['id'][:8], 'ref': ticket['id'], 'at': at.astimezone(SHANGHAI).strftime('%m-%d %H:%M'),
+                                    'title': ticket['title'][:160],
                                     'outcome': (ticket.get('ended') or {}).get('outcome', 'open'),
                                     'conclusion': conclusion(ticket.get('summary', ''))})
             # Lists put the most recently updated first, and a ticket is updated no earlier than it was created.
@@ -109,6 +113,67 @@ def read_tickets(url, since):
                 offset = None
     tickets.sort(key=lambda item: item['at'])
     return tickets[-MAX_TICKETS:]
+
+
+def lark_get(lark, path, params=None):
+    """GET an OpenAPI path as the bot and return its `data`; a failure raises."""
+    command = [lark, 'api', 'GET', path, '--as', 'bot', '--format', 'json'] + (['--params', json.dumps(params)] if params else [])
+    result = subprocess.run(command, capture_output=True, text=True, timeout=60, check=False)
+    try:
+        answer = json.loads(result.stdout)
+    except ValueError:
+        answer = None
+    if result.returncode != 0 or not isinstance(answer, dict) or answer.get('ok') is False:
+        raise RuntimeError(f'lark-cli GET {path.split("?")[0]} failed: {(result.stderr or result.stdout).strip()[-200:]}')
+    return answer.get('data') or {}
+
+
+def ticket_feedback(url, lark, app_id, ticket):
+    """`(up, down)`: people's 👍 and 👎 on the bot's replies in the topic of the ticket's Feishu message."""
+    page = management(url, f'tickets/{ticket["ref"]}')
+    messages = [channel['address']['messageId'] for channel in page.get('channels') or []
+                if channel.get('source') == 'feishu' and (channel.get('address') or {}).get('messageId')]
+    up = down = 0
+    for message in messages[:1]:
+        items = lark_get(lark, f'/open-apis/im/v1/messages/{message}').get('items') or [{}]
+        topic = items[0].get('thread_id')
+        if not topic:
+            continue
+        listed = lark_get(lark, '/open-apis/im/v1/messages', {'container_id_type': 'thread', 'container_id': topic, 'page_size': 50})
+        for reply in listed.get('items') or []:
+            if (reply.get('sender') or {}).get('id') != app_id:
+                continue
+            reactions = lark_get(lark, f'/open-apis/im/v1/messages/{reply["message_id"]}/reactions').get('items') or []
+            for reaction in reactions:
+                if (reaction.get('operator') or {}).get('operator_type') != 'user':
+                    continue
+                emoji = str((reaction.get('reaction_type') or {}).get('emoji_type', '')).lower()
+                up += emoji in UP
+                down += emoji in DOWN
+    return up, down
+
+
+def feedback(url, lark, tickets):
+    """`{ticket id: (up, down)}` for the tickets with any 👍 or 👎 on the bot's replies."""
+    state = management(url, 'state')
+    app_id = (((state.get('setup') or {}).get('accounts') or {}).get('feishu') or {}).get('appId')
+    if not app_id:
+        raise RuntimeError('the management API names no Feishu bot')
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        counts = dict(zip([ticket['id'] for ticket in tickets], pool.map(lambda ticket: ticket_feedback(url, lark, app_id, ticket), tickets)))
+    return {ticket: count for ticket, count in counts.items() if any(count)}
+
+
+def feedback_markdown(tickets, counts, hours):
+    """The digest's feedback section: totals over the feedback window, and each ticket someone marked 👎."""
+    if counts is None:
+        return ['**分析反馈**：这次没读到（飞书接口失败），下次日报再统计。', '']
+    up = sum(count[0] for count in counts.values())
+    down = sum(count[1] for count in counts.values())
+    lines = [f'**分析反馈**（过去 {hours} 小时 {len(tickets)} 张工单，{len(counts)} 张有反馈）：👍 {up} · 👎 {down}']
+    titles = {ticket['id']: ticket for ticket in tickets}
+    lines += [f'- 👎 {titles[ticket]["title"]}（{titles[ticket]["at"]}，`{ticket}`）' for ticket, count in counts.items() if count[1]]
+    return lines + ['']
 
 
 def api_key(credentials, ref):
@@ -192,7 +257,7 @@ def known_markdown(known, now):
     return '\n'.join(lines) + '\n'
 
 
-def digest_markdown(issues, headline, hours, total, now):
+def digest_markdown(issues, headline, hours, total, now, feedback_lines=()):
     stamp = now.astimezone(SHANGHAI).strftime('%m-%d %H:%M')
     human = [issue for issue in issues if issue['needs_human']]
     rest = [issue for issue in issues if not issue['needs_human']]
@@ -206,7 +271,8 @@ def digest_markdown(issues, headline, hours, total, now):
         lines += [f'- {issue["title"]}（{len(issue["ticket_ids"])} 张）' + (f'：{issue["action"]}' if issue['action'] and issue['action'] != '无需处理' else '')
                   for issue in rest]
     lines.append('')
-    lines.append('想看某一类的工单，在群里 @ 值班机器人问。')
+    lines += list(feedback_lines)
+    lines.append('想看某一类的工单，在群里 @ 值班机器人问；分析有用或不对，在那条回复上点 👍 或 👎。')
     return '\n'.join(lines)
 
 
@@ -231,6 +297,7 @@ def main():
     parser.add_argument('--base-url', default=os.environ.get('ONCALL_LLM_BASE_URL', ''))
     parser.add_argument('--model', default=os.environ.get('ONCALL_DIGEST_MODEL', ''))
     parser.add_argument('--lark-cli', default='lark-bot')
+    parser.add_argument('--feedback-hours', type=int, default=48, help='count 👍/👎 on replies of the tickets of this many hours (0: none)')
     parser.add_argument('--dry-run', action='store_true', help='print the digest and the known list; post and write nothing')
     args = parser.parse_args()
     try:
@@ -240,6 +307,8 @@ def main():
             raise Invalid('--url must be the loopback management API, such as http://127.0.0.1:3082')
         if not 1 <= args.hours <= 168:
             raise Invalid('--hours must be 1-168')
+        if not 0 <= args.feedback_hours <= 168:
+            raise Invalid('--feedback-hours must be 0-168')
         if not args.base_url.startswith('https://') or not args.model:
             raise Invalid('--base-url (https://...) and --model are required, or ONCALL_LLM_BASE_URL and ONCALL_DIGEST_MODEL')
     except Invalid as error:
@@ -250,13 +319,23 @@ def main():
         tickets = read_tickets(args.url, now - datetime.timedelta(hours=args.hours))
         known = json.loads(args.known.read_text()) if args.known.exists() else []
         if tickets:
+            shown = [{k: v for k, v in ticket.items() if k != 'ref'} for ticket in tickets]
             prompt = PROMPT.format(hours=args.hours, known=json.dumps([{k: entry.get(k) for k in ('key', 'title', 'cause', 'status')} for entry in known],
-                                                                         ensure_ascii=False), tickets=json.dumps(tickets, ensure_ascii=False, indent=0))
+                                                                         ensure_ascii=False), tickets=json.dumps(shown, ensure_ascii=False, indent=0))
             issues, headline = parse_answer(ask(args.base_url, api_key(args.credentials, args.key_ref), args.model, prompt), [t['id'] for t in tickets])
         else:
             issues, headline = [], f'过去 {args.hours} 小时没有工单。'
         known = merge(known, issues, now)
-        text = digest_markdown(issues, headline, args.hours, len(tickets), now)
+        lines = []
+        if args.feedback_hours:
+            marked = read_tickets(args.url, now - datetime.timedelta(hours=args.feedback_hours))
+            try:
+                counts = feedback(args.url, args.lark_cli, marked)
+            except (RuntimeError, OSError, subprocess.TimeoutExpired) as error:
+                print(f'oncall-ticket-digest: feedback not read: {error}', file=sys.stderr)
+                counts = None
+            lines = feedback_markdown(marked, counts, args.feedback_hours)
+        text = digest_markdown(issues, headline, args.hours, len(tickets), now, lines)
         if args.dry_run:
             print(text)
             print('\n---\n' + known_markdown(known, now))
