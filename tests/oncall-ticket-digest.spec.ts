@@ -93,7 +93,7 @@ function digest(base: string, ...args: string[]): Promise<{ code: number; stdout
   // The script requires https; the test runs a plain-HTTP stub through an override only the test sets.
   return new Promise(resolve => execFile('python3', ['-c', `import runpy, sys, urllib.request
 sys.argv = ${JSON.stringify(['oncall-ticket-digest', '--url', apiUrl, '--known', join(root, 'known.json'), '--chat', 'oc_digest',
-    '--credentials', join(root, 'credentials.yaml'), '--base-url', 'https://gateway.example', '--model', 'test-model', '--lark-cli', join(root, 'lark')])} + sys.argv[1:]
+    '--credentials', join(root, 'credentials.yaml'), '--fix-state', join(root, 'fixes.json'), '--base-url', 'https://gateway.example', '--model', 'test-model', '--lark-cli', join(root, 'lark')])} + sys.argv[1:]
 real = urllib.request.Request
 urllib.request.Request = lambda url, *a, **k: real(url.replace('https://gateway.example', ${JSON.stringify(base)}), *a, **k)
 runpy.run_path(${JSON.stringify(SCRIPT)}, run_name='__main__')`, ...args], { timeout: 30_000 },
@@ -165,4 +165,19 @@ it('posts the digest without feedback when Feishu reads fail', async () => {
   expect(result.code, result.stderr).toBe(0)
   expect(result.stderr).toContain('feedback not read')
   expect(readFileSync(join(root, 'sent.md'), 'utf8')).toContain('**分析反馈**：这次没读到')
+})
+
+it('counts the fixes oncall-fix started in the feedback window and lists those waiting for a person', async () => {
+  const at = (hours: number) => new Date(Date.now() - hours * 3600_000).toISOString()
+  writeFileSync(join(root, 'fixes.json'), JSON.stringify({
+    a: { created: at(2), stage: 'ready', repository: 'acme/site', pr_url: 'https://github.com/acme/site/pull/7' },
+    b: { created: at(3), stage: 'review', repository: 'acme/site' },
+    c: { created: at(5), stage: 'needs_human', repository: 'acme/site', pr_url: 'https://github.com/acme/site/pull/8' },
+    d: { created: at(100), stage: 'ready', repository: 'acme/old', pr_url: 'https://github.com/acme/old/pull/1' } }))
+  expect((await digest(await gateway(answer))).code).toBe(0)
+  const sent = readFileSync(join(root, 'sent.md'), 'utf8')
+  expect(sent).toContain('**自动修复**（过去 48 小时发起 3 个）：进行中 1 · 等人合并 1 · 没开 PR 0 · 需要人看 1')
+  expect(sent).toContain('- 等人合并：https://github.com/acme/site/pull/7')
+  expect(sent).toContain('- 需要人看：https://github.com/acme/site/pull/8')
+  expect(sent).not.toContain('acme/old')
 })

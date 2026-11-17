@@ -176,6 +176,22 @@ def feedback_markdown(tickets, counts, hours):
     return lines + ['']
 
 
+def fix_markdown(path, hours, now):
+    """The digest's line on oncall-fix: fixes started in the window by how far they got, or nothing without fixes."""
+    try:
+        fixes = list(json.loads(path.read_text()).values()) if path.exists() else []
+    except (OSError, ValueError):
+        return []
+    recent = [fix for fix in fixes if now - parse_time(fix['created']) <= datetime.timedelta(hours=hours)]
+    if not recent:
+        return []
+    count = lambda *stages: sum(1 for fix in recent if fix.get('stage') in stages)
+    pending = [f'- 等人合并：{fix["pr_url"]}' for fix in recent if fix.get('stage') == 'ready']
+    pending += [f'- 需要人看：{fix.get("pr_url") or fix["repository"]}' for fix in recent if fix.get('stage') in ('needs_human', 'failed')]
+    return [f'**自动修复**（过去 {hours} 小时发起 {len(recent)} 个）：进行中 {count("fixing", "review", "revising")} · '
+            f'等人合并 {count("ready")} · 没开 PR {count("no_pr")} · 需要人看 {count("needs_human", "failed")}', *pending, '']
+
+
 def api_key(credentials, ref):
     """The gateway key named `ref` in the DSH credentials file; it is never printed."""
     text = Path(credentials).read_text()
@@ -297,6 +313,8 @@ def main():
     parser.add_argument('--base-url', default=os.environ.get('ONCALL_LLM_BASE_URL', ''))
     parser.add_argument('--model', default=os.environ.get('ONCALL_DIGEST_MODEL', ''))
     parser.add_argument('--lark-cli', default='lark-bot')
+    parser.add_argument('--fix-state', type=Path, default=Path.home() / '.local' / 'state' / 'oncall-fix.json',
+                        help='the oncall-fix state, whose fixes of the feedback window are counted')
     parser.add_argument('--feedback-hours', type=int, default=48, help='count 👍/👎 on replies of the tickets of this many hours (0: none)')
     parser.add_argument('--dry-run', action='store_true', help='print the digest and the known list; post and write nothing')
     args = parser.parse_args()
@@ -335,6 +353,7 @@ def main():
                 print(f'oncall-ticket-digest: feedback not read: {error}', file=sys.stderr)
                 counts = None
             lines = feedback_markdown(marked, counts, args.feedback_hours)
+        lines = fix_markdown(args.fix_state, args.feedback_hours or 48, now) + lines
         text = digest_markdown(issues, headline, args.hours, len(tickets), now, lines)
         if args.dry_run:
             print(text)
