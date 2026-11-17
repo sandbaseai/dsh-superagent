@@ -24,6 +24,15 @@ export interface OutboxHost {
 export class Outbox implements OutboxPort {
   constructor(private readonly host: OutboxHost) {
     host.effects.handle('reply', (_payload, id) => this.deliver(id), { limit: () => host.paused() ? 0 : 1, retry: [5000, 300_000] })
+    // An earlier version queued Feishu notices without the IM limit check; they can never be sent and would hold the queue.
+    const { store, effects } = host
+    store.atomic(() => {
+      for (const receipt of store.receipts.waiting()) {
+        if (receipt.channel.source !== 'feishu' || wordCount(receipt.text) <= IM_WORDS) continue
+        store.receipts.settle(receipt, 'tooLong')
+        effects.cancel('reply', receipt.id)
+      }
+    })
   }
   /** Record a message receipt and enqueue its delivery effect atomically; duplicate message IDs are ignored. */
   send(message: OutboundMessage): void {
@@ -45,8 +54,6 @@ export class Outbox implements OutboxPort {
     // Hold later messages for the same ticket and conversation behind an earlier pending message until it exceeds the failure threshold.
     if (store.receipts.behind(id, FAILURES_BEFORE_ERROR)) throw new Later('An earlier message of this ticket to this conversation waits')
     if (!sources.channelAllowed(receipt.channel)) { store.receipts.settle(receipt, 'channelIgnored'); return }
-    // A message queued before the limit applied to it can never be sent; retrying it would only hold the queue.
-    if (receipt.channel.source === 'feishu' && wordCount(receipt.text) > IM_WORDS) { store.receipts.settle(receipt, 'tooLong'); return }
     // A permanently unreachable target (such as a recalled message or deleted Issue) settles as `channelGone` so its receipt prevents retries.
     const directory = receipt.ticketId ? this.host.ticketDirectory?.(receipt.ticketId) : undefined
     const result = await sources.send(receipt, commands, directory)
