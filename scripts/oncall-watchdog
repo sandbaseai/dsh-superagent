@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""Watch dsh-superagent's live tickets for work that is stuck, tell a Feishu chat, and stop a worker that runs far too long.
+
+Run it from cron every few minutes. Through the loopback management API it reads the live tickets and:
+
+- a running worker past --warn-minutes (default 15): posts once that it is still running;
+- a running worker past --stop-minutes (default 30): stops the ticket, which frees its worker slot for other alerts, and
+  posts that it stopped; the alert then has no analysis, so a person should look;
+- a ticket queued for a worker slot past --warn-minutes: posts once;
+- a ticket waiting for a person (a blocked or failed report, or a failed delivery) past --warn-minutes: posts once.
+
+On-call workers report within about five minutes, so these limits only catch work that went wrong. Each ticket is posted
+about at most once per kind; the state file remembers which. Exit 0 when the check ran, 1 when the management API or the
+post failed, 2 for a bad argument.
+
+  oncall-watchdog --url http://127.0.0.1:3182 --chat oc_... [--lark-cli lark-bot] [--panel-url https://...] [--dry-run]
+"""
+
+import argparse
+import datetime
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import urllib.error
+import urllib.request
+
+SHANGHAI = datetime.timezone(datetime.timedelta(hours=8))
+PAGE = 200
+PERSON = {'blocked': '报告卡住', 'failed': '报告失败', 'delivery': '消息没送到 worker'}
+
+
+class Invalid(Exception):
+    """A bad argument."""
+
+
+def parse_time(text):
+    return datetime.datetime.fromisoformat(text.replace('Z', '+00:00'))
+
+
+def management(url, method, path):
+    """Call the loopback management API with the panel's marker header and return its JSON answer."""
+    request = urllib.request.Request(url.rstrip('/') + '/orchestrator/api/' + path, method=method,
+                                     headers={'x-orchestrator-request': '1', 'accept': 'application/json'})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.loads(response.read() or b'{}')
+    except urllib.error.HTTPError as error:
+        raise RuntimeError(f'{method} {path} answered {error.code}') from None
+    except urllib.error.URLError as error:
+        raise RuntimeError(f'{method} {path} failed: {error.reason}') from None
+
+
+def listed(url, state):
+    """Every ticket the API lists under `state`."""
+    items, offset = [], 0
+    while offset is not None:
+        page = management(url, 'GET', f'tickets?state={state}&offset={offset}&limit={PAGE}')
+        items += page.get('items') or []
+        offset = page.get('next_offset')
+    return items
+
+
+def findings(url, now, warn, stop):
+    """`[(ticket, kind, minutes)]`: kind is `running`, `stop`, `queued` or a person's action, for tickets past their limit."""
+    found = []
+    for ticket in listed(url, 'working'):
+        if ticket.get('action') == 'queued':
+            minutes = (now - parse_time(ticket['createdAt'])).total_seconds() / 60
+            if minutes >= warn:
+                found.append((ticket, 'queued', minutes))
+            continue
+        assignments = management(url, 'GET', f'tickets/{ticket["id"]}').get('assignments') or []
+        started = [parse_time(item['startedAt']) for item in assignments if item.get('startedAt') and item.get('state') == 'running']
+        if not started:
+            continue
+        minutes = (now - max(started)).total_seconds() / 60
+        if minutes >= stop:
+            found.append((ticket, 'stop', minutes))
+        elif minutes >= warn:
+            found.append((ticket, 'running', minutes))
+    for ticket in listed(url, 'person'):
+        minutes = (now - parse_time(ticket['updatedAt'])).total_seconds() / 60
+        if ticket.get('action') in PERSON and minutes >= warn:
+            found.append((ticket, ticket['action'], minutes))
+    return found
+
+
+def line(ticket, kind, minutes, panel):
+    title = ticket['title'][:100]
+    where = f'（[面板]({panel.rstrip("/")}/)，工单 `{ticket["id"][:8]}`）' if panel else f'（工单 `{ticket["id"][:8]}`）'
+    if kind == 'stop':
+        return f'- **已停止** {title}：worker 跑了 {minutes:.0f} 分钟还没交报告，停掉以腾出位置；这条告警没有分析，需要人看{where}'
+    if kind == 'running':
+        return f'- {title}：worker 已跑 {minutes:.0f} 分钟（平时 5 分钟内交报告）{where}'
+    if kind == 'queued':
+        return f'- {title}：排队等 worker 已 {minutes:.0f} 分钟，worker 可能都被占着{where}'
+    return f'- {title}：{PERSON[kind]}，已等人 {minutes:.0f} 分钟{where}'
+
+
+def post(lark, chat, text):
+    """Send `text` as Markdown to `chat` with a bot-only lark-cli."""
+    with tempfile.TemporaryDirectory(prefix='oncall-watchdog-') as scratch:
+        Path(scratch, 'watchdog.md').write_text(text)
+        result = subprocess.run([lark, 'im', '+messages-send', '--chat-id', chat, '--markdown', '@watchdog.md', '--as', 'bot'],
+                                cwd=scratch, capture_output=True, text=True, timeout=120, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(f'lark-cli send exited {result.returncode}: {(result.stderr or result.stdout).strip()[-300:]}')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--url', default=os.environ.get('DSH_SUPERAGENT_URL') or 'http://127.0.0.1:3082')
+    parser.add_argument('--chat', required=True, help='the Feishu chat id to post to')
+    parser.add_argument('--lark-cli', default='lark-bot', help='a lark-cli that may act only as the bot')
+    parser.add_argument('--panel-url', default='', help='the panel address people open, linked from each line')
+    parser.add_argument('--warn-minutes', type=float, default=15)
+    parser.add_argument('--stop-minutes', type=float, default=30)
+    parser.add_argument('--state', type=Path, default=Path.home() / '.local' / 'state' / 'oncall-watchdog.json')
+    parser.add_argument('--dry-run', action='store_true', help='print what it would post and stop; change nothing')
+    args = parser.parse_args()
+    try:
+        if not re.fullmatch(r'oc_[A-Za-z0-9]+', args.chat):
+            raise Invalid('--chat must be a Feishu chat id (oc_...)')
+        if not re.fullmatch(r'http://(127\.0\.0\.1|localhost)(:\d+)?/?', args.url):
+            raise Invalid('--url must be the loopback management API, such as http://127.0.0.1:3082')
+        if not 0 < args.warn_minutes < args.stop_minutes:
+            raise Invalid('--warn-minutes must be positive and below --stop-minutes')
+        if args.panel_url and not args.panel_url.startswith('https://'):
+            raise Invalid('--panel-url must be an https:// address')
+    except Invalid as error:
+        print(f'oncall-watchdog: {error}', file=sys.stderr)
+        return 2
+    now = datetime.datetime.now(datetime.timezone.utc)
+    try:
+        notified = json.loads(args.state.read_text()) if args.state.exists() else {}
+    except ValueError:
+        notified = {}
+    try:
+        found = findings(args.url, now, args.warn_minutes, args.stop_minutes)
+        new = [(ticket, kind, minutes) for ticket, kind, minutes in found if kind not in notified.get(ticket['id'], [])]
+        if args.dry_run:
+            for ticket, kind, minutes in new:
+                print(('would stop: ' if kind == 'stop' else 'would post: ') + line(ticket, kind, minutes, args.panel_url))
+            return 0
+        for ticket, kind, _ in new:
+            if kind == 'stop':
+                management(args.url, 'POST', f'tickets/{ticket["id"]}/stop')
+        if new:
+            stamp = now.astimezone(SHANGHAI).strftime('%m-%d %H:%M')
+            post(args.lark_cli, args.chat, f'**值班 Watchdog {stamp}**\n' + '\n'.join(line(*item, args.panel_url) for item in new))
+        live = {ticket['id'] for ticket, _, _ in found}
+        state = {ticket: kinds for ticket, kinds in notified.items() if ticket in live}
+        for ticket, kind, _ in new:
+            state.setdefault(ticket['id'], []).append(kind)
+        args.state.parent.mkdir(parents=True, exist_ok=True)
+        args.state.write_text(json.dumps(state) + '\n')
+        print(f'oncall-watchdog: {len(found)} past a limit, {len(new)} posted')
+    except (OSError, RuntimeError, KeyError, ValueError, subprocess.TimeoutExpired) as error:
+        print(f'oncall-watchdog: {error}', file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
