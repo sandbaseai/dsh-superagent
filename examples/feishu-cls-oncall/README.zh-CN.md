@@ -306,7 +306,7 @@ Check dsh-superagent: run `scripts/dsh-superagent --profile superagent status` i
 
 ## 自动修复（可选）
 
-worker 确认一个靠改代码或配置就能解决的问题后，在分析回复的**建议**里提议修复（“回复「修复」即可自动开 PR”）；名单里的人在话题里回复同意后，工单恢复，worker 才运行 `oncall-fix submit`：它在 SandBase Agents 上启动一个修复 Agent，由它在 GitHub 上开 PR；再由另一个审阅 Agent 读 PR，把阻塞问题写成 PR 评论，修复 Agent 按评论在同一分支上改，最多审阅两轮。审阅通过后**由人合并**。每一步需要人知道的结果都回复在告警所在的话题里。能改哪些仓库由 SandBase Agents 的 GitHub 授权决定，这个工具不另设名单；一张工单只发起一次。
+worker 确认一个靠改代码或配置就能解决的问题后，在分析回复末尾 @所有人 提议修复，写明问题、原因、要改什么和风险（“回复「修复」自动开 PR”）；群里任何名单内的人在话题里回复同意后，工单恢复，worker 才运行 `oncall-fix submit`：它在 SandBase Agents 上启动一个修复 Agent，由它在 GitHub 上开 PR；再由另一个审阅 Agent 读 PR，把阻塞问题写成 PR 评论，修复 Agent 按评论在同一分支上改，最多审阅两轮。审阅通过后**由人合并**。每一步需要人知道的结果都回复在告警所在的话题里。能改哪些仓库由 SandBase Agents 的 GitHub 授权决定，这个工具不另设名单；一张工单只发起一次。
 
 准备：
 
