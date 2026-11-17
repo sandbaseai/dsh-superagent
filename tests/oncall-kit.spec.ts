@@ -59,7 +59,7 @@ describe('the kit settings', () => {
     const { admission, ...part } = (policy as { sources: { feishu: Record<string, unknown> } }).sources.feishu
     expect(admission).toEqual({})
     expect(feishuKind.policy!.schema.parse(part)).toEqual({ allowed: [], syncChat: '', bots: [{ id: 'cli_clsalarm', name: '腾讯云告警' }] })
-    expect(EvalConfigSchema.parse(evaluation)).toEqual({ mode: 'observe', timeoutSeconds: 120, nearbyMinutes: 360, model: { provider: 'anthropic-gateway', model: 'claude-sonnet-5-5' } })
+    expect(EvalConfigSchema.parse(evaluation)).toEqual({ mode: 'observe', timeoutSeconds: 300, nearbyMinutes: 360, model: { provider: 'anthropic-gateway', model: 'claude-sonnet-5-5' } })
     expect(ExecutorConfigSchema.parse(executor)).toMatchObject({ model: { provider: 'anthropic-gateway', model: 'claude-opus-5-5' }, maxWorkers: 2,
       blockedCommands: expect.arrayContaining(['kubectl', 'curl', 'tccli']) })
   })
