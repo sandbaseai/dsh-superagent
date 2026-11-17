@@ -49,6 +49,8 @@ MAX_BRIEF = 12000
 STAGE_HOURS = 3
 DONE = {'ready', 'needs_human', 'no_pr', 'failed'}
 SHANGHAI = datetime.timezone(datetime.timedelta(hours=8))
+# Mentions everyone in the chat: a fix waits for whoever is on call to merge or decide.
+EVERYONE = '<at user_id="all"></at> '
 
 
 class Refused(Exception):
@@ -244,7 +246,7 @@ def advance(args, agents, fix):
     """Move one fix forward as far as its Sessions allow; returns whether it changed."""
     if datetime.datetime.fromisoformat(fix['since']) < now() - datetime.timedelta(hours=STAGE_HOURS):
         fix.update(stage='failed', since=stamp(), reason=f'stage {fix["stage"]} took more than {STAGE_HOURS} h')
-        notify(args, fix, f'**自动修复超时**：{STAGE_HOURS} 小时没有进展，需要人看。' + (f'PR：{fix["pr_url"]}' if fix.get('pr_url') else ''))
+        notify(args, fix, EVERYONE + f'**自动修复超时**：{STAGE_HOURS} 小时没有进展，需要人看。' + (f'PR：{fix["pr_url"]}' if fix.get('pr_url') else ''))
         return True
     if fix['stage'] in ('fixing', 'revising'):
         status, items = settled(agents, fix['fix_session'], fix.get('fix_answer'))
@@ -252,14 +254,14 @@ def advance(args, agents, fix):
             return False
         if status == 'failed':
             fix.update(stage='failed', since=stamp(), reason='the fix Session failed')
-            notify(args, fix, '**自动修复失败**：修复 Agent 的会话出错，需要人看。' + (f'PR：{fix["pr_url"]}' if fix.get('pr_url') else ''))
+            notify(args, fix, EVERYONE + '**自动修复失败**：修复 Agent 的会话出错，需要人看。' + (f'PR：{fix["pr_url"]}' if fix.get('pr_url') else ''))
             return True
         fix['fix_answer'], answer = latest_answer(items)
         if fix['stage'] == 'fixing':
             url, number = pull_request(items)
             if not url:
                 fix.update(stage='no_pr', since=stamp(), reason=short(answer, 500))
-                notify(args, fix, f'**自动修复没有开 PR**：{short(answer)}')
+                notify(args, fix, EVERYONE + f'**自动修复没有开 PR**：{short(answer)}')
                 return True
             fix.update(pr_url=url, pr_number=number)
             notify(args, fix, f'**已提交修复 PR**：{url}\n正在自动审阅，结果会回复在这里。')
@@ -276,18 +278,18 @@ def advance(args, agents, fix):
         result = verdict(answer) if status == 'done' else None
         if result is None:
             fix.update(stage='needs_human', since=stamp(), reason='the review gave no verdict')
-            notify(args, fix, f'**自动审阅没有给出结论**，需要人审阅：{fix["pr_url"]}')
+            notify(args, fix, EVERYONE + f'**自动审阅没有给出结论**，需要人审阅：{fix["pr_url"]}')
             return True
         fix['verdicts'] = fix.get('verdicts', []) + [{k: result.get(k) for k in ('verdict', 'risk', 'head_sha', 'summary')}]
         summary = short(str(result.get('summary', '')))
         if result['verdict'] == 'approve':
             fix.update(stage='ready', since=stamp())
             risk = '低' if result.get('risk') == 'low' else '高'
-            notify(args, fix, f'**审阅通过，等人合并**（{risk}风险，第 {fix["round"]} 轮）：{fix["pr_url"]}\n{summary}')
+            notify(args, fix, EVERYONE + f'**审阅通过，等人合并**（{risk}风险，第 {fix["round"]} 轮）：{fix["pr_url"]}\n{summary}')
             return True
         if fix['round'] >= args.max_rounds:
             fix.update(stage='needs_human', since=stamp(), reason=f'{fix["round"]} review rounds left blockers')
-            notify(args, fix, f'**{fix["round"]} 轮审阅后仍有阻塞问题**，需要人看：{fix["pr_url"]}\n{summary}')
+            notify(args, fix, EVERYONE + f'**{fix["round"]} 轮审阅后仍有阻塞问题**，需要人看：{fix["pr_url"]}\n{summary}')
             return True
         agents.send(fix['fix_session'], f'Review round {fix["round"]} comments were posted on pull request #{fix["pr_number"]}. Read them and address '
                     'the blockers of the latest oncall-review comment on the same branch.', f'oncall-fix-{fix["ticket"][:16]}-revise-{fix["round"]}')

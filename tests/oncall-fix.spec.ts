@@ -110,8 +110,8 @@ it('takes a fix through a requested change to an approved review, replying in th
   finish('ses_3', review('approve', '通过'))
   await tick()
   expect(stage().stage).toBe('ready')
-  expect(replies()).toEqual([expect.stringContaining('**已提交修复 PR**：https://github.com/acme/site/pull/7'),
-    expect.stringContaining('**审阅通过，等人合并**（低风险，第 2 轮）')])
+  expect(replies()).toEqual([expect.stringMatching(/^\*\*已提交修复 PR\*\*：https:\/\/github\.com\/acme\/site\/pull\/7/),
+    expect.stringContaining('<at user_id="all"></at> **审阅通过，等人合并**（低风险，第 2 轮）')])
   expect(keys).toContain(`oncall-review-${TICKET.slice(0, 16)}-r2`)
   // A finished fix is left alone.
   await tick()
