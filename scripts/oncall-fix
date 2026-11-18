@@ -22,9 +22,9 @@ into the topic of the ticket's alert. The fix and review Agents, the SandBase ke
 config file (mode 0600):
 
   SANDBASE_AGENTS_URL, SANDBASE_API_KEY, FIX_AGENT_ID, REVIEW_AGENT_ID, MODEL_BASE_URL, MODEL_API_KEY, and DEV_AGENT_ID for designs
-  REPOSITORIES  owner/name@repository_id,... with the decimal ids github_list_repositories gives: every Session of a listed
-            repository starts with it cloned into /workspace, and the Agents work there with git. An unlisted repository's
-            Sessions start without a clone and use the file tools.
+  REPOSITORIES  owner/name@repository_id,... with the decimal ids github_list_repositories gives: every Session starts with its
+            repository cloned into /workspace, and the Agents work there with git. A request for an unlisted repository is
+            refused: without a clone an Agent can commit only part of a change.
   RELEASES  optional: owner/name:.github/workflows/file.yaml,... the listed repositories whose merged fixes are released, with
             the workflow_dispatch workflow that takes the input `tag`. The fix Agent needs github_create_tag and
             github_dispatch_workflow, and the workflow must be allowlisted. Everything merged on main ships with the fix:
@@ -169,11 +169,12 @@ class Agents:
         except urllib.error.URLError as error:
             raise Failed(f'SandBase {method} {path.split("?")[0]} failed: {error.reason}') from None
 
-    def start(self, agent, title, text, key, workspace=None):
+    def start(self, agent, title, text, key, workspace):
+        if not workspace:
+            raise Failed(f'no repository id for the Session {title!r}: list its repository in REPOSITORIES')
         provider = {'type': 'custom', 'base_url': self.config['MODEL_BASE_URL'], 'api_key': self.config['MODEL_API_KEY']}
-        body = {'agent_id': agent, 'title': title[:120], 'input': text, 'model_provider': provider}
-        if workspace:
-            body['github_workspace'] = {'repository_id': workspace}
+        body = {'agent_id': agent, 'title': title[:120], 'input': text, 'model_provider': provider,
+                'github_workspace': {'repository_id': workspace}}
         return self.call('POST', '/agents/sessions', body, key)['id']
 
     def send(self, session, text, key):
@@ -509,6 +510,9 @@ def command_submit(args, config):
     brief = (sys.stdin.read() if args.brief == '-' else Path(args.brief).read_text(encoding='utf-8')).strip()
     if not 40 <= len(brief) <= MAX_BRIEF:
         raise Refused(f'the brief must be 40-{MAX_BRIEF} characters: the problem, the evidence and the change wanted')
+    workspace = config['clones'].get(args.repository.lower())
+    if not workspace:
+        raise Refused(f'{args.repository} is not in REPOSITORIES of {args.config}; add it as owner/name@repository_id first')
     agent = config.get(KINDS[args.kind]['agent'])
     if not agent:
         raise Refused(f'{args.config} lacks {KINDS[args.kind]["agent"]} for --kind {args.kind}')
@@ -521,7 +525,7 @@ def command_submit(args, config):
         key, fix_tag = (ticket, ticket[:16]) if not mine else (f'{ticket}:{len(mine) + 1}', f'{ticket[:16]}-{len(mine) + 1}')
         task = (design_task if args.kind == 'design' else fix_task)(args.repository, ticket, brief)
         session = Agents(config).start(agent, f'oncall-{args.kind}: {args.repository} for ticket {ticket[:8]}', task, f'oncall-{args.kind}-{fix_tag}',
-                                       workspace=config['clones'].get(args.repository.lower()))
+                                       workspace=workspace)
         fixes[key] = {'ticket': ticket, 'kind': args.kind, 'tag': fix_tag, 'repository': args.repository, 'brief': brief,
                       'fix_session': session, 'stage': 'fixing', 'created': stamp(), 'since': stamp()}
     print(json.dumps({'submitted': True, 'kind': args.kind, 'stage': 'fixing', 'session': session,

@@ -318,7 +318,7 @@ worker 确认一个靠改代码或配置就能解决的问题后，在分析回�
 */5 * * * * cd $HOME && python3 $HOME/dsh-superagent/scripts/oncall-fix tick --url http://127.0.0.1:<port> --lark-cli $HOME/.local/bin/lark-bot >> $HOME/oncall-fix.log 2>&1
 ```
 
-4. 在 `fix.env` 加 `REPOSITORIES=owner/name@repository_id,...`，`repository_id` 是 `github_list_repositories` 返回的十进制 ID。列出的仓库，修复、审阅、设计和发布会话启动时都会把仓库克隆到 `/workspace`，Agent 在里面用 git 搜索、修改、跑测试、提交并推送到 `agents/<session>/…` 分支，再用 `github_open_pull_request` 开 PR；没列出的仓库仍用逐文件读写的工具。
+4. 在 `fix.env` 加 `REPOSITORIES=owner/name@repository_id,...`，`repository_id` 是 `github_list_repositories` 返回的十进制 ID。修复、审阅、设计和发布会话启动时都会把仓库克隆到 `/workspace`，Agent 在里面用 git 搜索、修改、跑测试、提交并推送到 `agents/<session>/…` 分支，再用 `github_open_pull_request` 开 PR。没列出的仓库直接拒绝发起，`submit` 会提示先把它加进 `REPOSITORIES`：没有克隆，Agent 只能逐文件提交，容易只提交一部分改动。
 5. 可选，合并后自动发布生产：再加 `RELEASES=owner/name:.github/workflows/deploy.yaml`（仓库须在 `REPOSITORIES` 里，workflow 接受输入 `tag`，即 `v*`）。在 Console 给 GitHub 连接的工具上限加 `github_create_tag` 和 `github_dispatch_workflow`，把该 workflow 加进白名单（分支 main），并在修复 Agent 上显式勾选这两个工具。`oncall-fix merge` 合并成功后自动发布；人在 GitHub 上自己合并的，在话题里说「发布」，worker 运行 `oncall-fix release`。发布由修复 Agent 新开一个克隆了该仓库的会话完成：在 main 最新提交上打下一个 `vMAJOR.MINOR.PATCH`，以这个 tag 触发 workflow，等部署结束，结果回复到话题。发布的是整个 main，别人已合并还没发布的改动会一起上线；合并已包含在最新 tag 里时只回复“已上线”。PR 须以 merge commit 合并（squash 后原提交不在 main 上，会拒绝发布）。
 
 `oncall-fix status` 列出所有修复、所处阶段和发布的 tag；工单日报会统计过去 48 小时发起的修复，并列出等人合并和需要人看的 PR。

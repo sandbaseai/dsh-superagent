@@ -61,7 +61,7 @@ beforeEach(async () => {
   panelUrl = `http://127.0.0.1:${(panel.address() as AddressInfo).port}`
   // The script requires https; the test serves plain HTTP and rewrites the configured https address in the request.
   writeFileSync(join(root, 'fix.env'), ['SANDBASE_AGENTS_URL=https://agents.example/v1', `SANDBASE_API_KEY=${SANDBASE_KEY}`, 'FIX_AGENT_ID=agt_fix',
-    'REVIEW_AGENT_ID=agt_review', 'DEV_AGENT_ID=agt_dev', '\u200bMODEL_BASE_URL=\u200bhttps://gateway.example', `MODEL_API_KEY=${MODEL_KEY}`].join('\n') + '\n', { mode: 0o600 })
+    'REVIEW_AGENT_ID=agt_review', 'DEV_AGENT_ID=agt_dev', '\u200bMODEL_BASE_URL=\u200bhttps://gateway.example', `MODEL_API_KEY=${MODEL_KEY}`, 'REPOSITORIES=acme/site@4242,acme/admin@4343'].join('\n') + '\n', { mode: 0o600 })
   writeFileSync(join(root, 'lark'), `#!/bin/sh\nfor a; do [ "$prev" = --markdown ] && printf '%s\\n---\\n' "$a" >> ${JSON.stringify(join(root, 'replies.md'))}; prev=$a; done\n`, { mode: 0o755 })
   writeFileSync(join(root, 'brief.md'), 'Problem: /free-tools/photo-restoration returns 404. Evidence: CLB 08:36. Change: add a redirect.')
 })
@@ -231,7 +231,7 @@ const MAIN = 'c'.repeat(40)
 const tagged = (tag: string) => called('github_create_tag', { tag, sha: MAIN, url: `https://github.com/acme/site/releases/tag/${tag}` })
 const dispatched = (runId: string | null) => called('github_dispatch_workflow', { status: 'dispatched', run_id: runId, html_url: runId ? `https://github.com/acme/site/actions/runs/${runId}` : null, workflow_path: '.github/workflows/deploy.yaml', ref: 'main' })
 const runOf = (runId: string, conclusion: string, created = new Date(Date.now() + 1000).toISOString()) => called('github_read_workflow_runs', { run: { run_id: runId, event: 'workflow_dispatch', head_sha: MAIN, status: 'completed', conclusion, created_at: created, html_url: `https://github.com/acme/site/actions/runs/${runId}` } })
-const withReleases = () => writeFileSync(join(root, 'fix.env'), readFileSync(join(root, 'fix.env'), 'utf8') + 'REPOSITORIES=acme/site@4242,acme/admin@4343\nRELEASES=acme/site:.github/workflows/deploy.yaml\n', { mode: 0o600 })
+const withReleases = () => writeFileSync(join(root, 'fix.env'), readFileSync(join(root, 'fix.env'), 'utf8') + 'RELEASES=acme/site:.github/workflows/deploy.yaml\n', { mode: 0o600 })
 async function ready() {
   await fix('submit', '--repository', 'acme/site', '--brief', join(root, 'brief.md'))
   finish(stage().fix_session, answer('Opened #7.'), opened(7)); await tick()
@@ -302,6 +302,14 @@ it('refuses a bad REPOSITORIES or RELEASES entry, and a release of a repository 
   expect(await tick()).toMatchObject({ code: 2, stderr: expect.stringContaining('owner/name@repository_id') })
   write('REPOSITORIES=acme/site@4242\nRELEASES=acme/site:deploy.yaml\n')
   expect(await tick()).toMatchObject({ code: 2, stderr: expect.stringContaining('owner/name:.github/workflows/file.yaml') })
-  write('RELEASES=acme/site:.github/workflows/deploy.yaml\n')
+  write('RELEASES=acme/other:.github/workflows/deploy.yaml\n')
   expect(await tick()).toMatchObject({ code: 2, stderr: expect.stringContaining('which REPOSITORIES does not list') })
+})
+
+it('refuses a request for a repository REPOSITORIES does not list, before starting a Session', async () => {
+  expect(await fix('submit', '--repository', 'acme/other', '--brief', join(root, 'brief.md')))
+    .toMatchObject({ code: 2, stderr: expect.stringContaining('acme/other is not in REPOSITORIES') })
+  expect(sessions.size).toBe(0)
+  await fix('submit', '--repository', 'acme/site', '--brief', join(root, 'brief.md'))
+  expect([...sessions.values()][0]!.workspace).toEqual({ repository_id: '4242' })
 })
