@@ -22,6 +22,7 @@ import { cancelled, collectJob, killJobs, runningJobs, stopBackground, stopSubag
 const now = (): string => new Date().toISOString()
 /** Returns the worker session ID (`worker-<ticketId>`) for a ticket. */
 export const workerSessionId = (ticketId: string): string => `worker-${ticketId}`
+export interface WorkerActivity { ticketId: string; turn: boolean; jobs: number }
 /** Returns the ticket ID for a worker session ID (`worker-<ticketId>`), or undefined for non-worker sessions. */
 export const ticketOfSession = (sessionId: string): string | undefined => sessionId.startsWith('worker-') ? sessionId.slice('worker-'.length) : undefined
 /** Maximum runtime for a workspace prepare command. */
@@ -402,6 +403,14 @@ export class DshExecutor implements Executor {
   }
   /** Number of open tickets whose worker holds a worker slot: its turn runs, or its shell jobs or subagents still run after its turn ended. */
   activeCount(): number { return this.host.store.tickets.open().filter(ticket => this.running(ticket)).length }
+  /** The workers that hold a slot: whether their turn runs, or only their background work does, and how many shell jobs they own. */
+  workers(): WorkerActivity[] {
+    return this.host.store.tickets.open().filter(ticket => this.running(ticket)).map(ticket => {
+      const sessionId = workerSessionId(ticket.id)
+      return { ticketId: ticket.id, turn: this.host.context.agents.get(sessionId as SessionId)?.status === 'running',
+        jobs: runningJobs(this.host.context, sessionId).length }
+    })
+  }
   /** Whether a ticket's worker holds a worker slot: its turn runs, or its shell jobs or subagents do after its turn ended. */
   private running(ticket: Ticket): boolean {
     if (!runningAssignment(ticket)) return false
