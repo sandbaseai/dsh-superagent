@@ -11,7 +11,7 @@ const SCRIPT = join(import.meta.dirname, '..', 'scripts', 'oncall-watchdog')
 let root: string, api: Server, url: string
 let calls: string[] = []
 const ago = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString()
-type Row = { id: string; title: string; stage: string; action?: string; createdAt: string; updatedAt: string; started?: string }
+type Row = { id: string; title: string; stage: string; action?: string; createdAt: string; updatedAt: string; started?: string; lastAt?: string }
 let tickets: Row[] = []
 
 beforeEach(async () => {
@@ -30,6 +30,11 @@ beforeEach(async () => {
     calls.push(`${request.method} ${path}`)
     if (request.headers['x-orchestrator-request'] !== '1') { response.writeHead(403); response.end(); return }
     response.writeHead(200, { 'content-type': 'application/json' })
+    if (path === 'live') {
+      response.end(JSON.stringify({ tickets: tickets.filter(ticket => ticket.started).map(ticket => ({ id: ticket.id, turn: true,
+        activity: { lastAt: ticket.lastAt ?? ago(0), lastTool: { name: 'bash', detail: 'dsh-oncall cls --topic `api`' } } })) }))
+      return
+    }
     const stop = /^tickets\/(\w+)\/stop$/.exec(path)
     if (stop) { tickets = tickets.filter(ticket => ticket.id !== stop[1]); response.end('{"stopped":true}'); return }
     const detail = /^tickets\/(\w+)$/.exec(path)
@@ -85,6 +90,21 @@ it('says nothing when every ticket is within its limits, and changes nothing on 
   expect(dry.stdout).toContain('would stop: - **已停止** 卡住的告警')
   expect(calls.filter(call => call.startsWith('POST'))).toEqual([])
   expect(sent()).toEqual([])
+})
+
+it('reports a worker with no action for ten minutes once, with its last command, before its run time would warn', async () => {
+  tickets = [{ id: 'quiet000gggg', title: '没动静的告警', stage: 'working', createdAt: ago(12), updatedAt: ago(12), started: ago(12),
+    lastAt: ago(11) }, { id: 'busy0000hhhh', title: '一直在查的告警', stage: 'working', createdAt: ago(12), updatedAt: ago(1),
+    started: ago(12), lastAt: ago(1) }]
+  await watch()
+  expect(sent()).toHaveLength(1)
+  expect(sent()[0]).toContain('- 没动静的告警：worker 已 11 分钟没有动作，最后调用 `bash`：`dsh-oncall cls --topic api`，可能卡住了')
+  expect(sent()[0]).not.toContain('一直在查的告警')
+  // It only reports; nothing is stopped, and the same quiet is not posted again.
+  expect(calls.filter(call => call.startsWith('POST'))).toEqual([])
+  await watch()
+  expect(sent()).toHaveLength(1)
+  expect(await watch('--quiet-minutes', '0')).toMatchObject({ code: 2 })
 })
 
 it('refuses a non-loopback API and limits in the wrong order before reading anything', async () => {

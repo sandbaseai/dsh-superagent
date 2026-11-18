@@ -3,6 +3,8 @@
 
 Run it from cron every few minutes. Through the loopback management API it reads the live tickets and:
 
+- a running worker whose turn has had no tool call, tool result or model answer for --quiet-minutes (default 10): posts
+  once that it looks stuck, with the last tool it called; this only reports;
 - a running worker past --warn-minutes (default 15): posts once that it is still running;
 - a running worker past --stop-minutes (default 30): stops the ticket, which frees its worker slot for other alerts, and
   posts that it stopped; the alert then has no analysis, so a person should look;
@@ -64,9 +66,16 @@ def listed(url, state):
     return items
 
 
-def findings(url, now, warn, stop):
-    """`[(ticket, kind, minutes)]`: kind is `running`, `stop`, `queued` or a person's action, for tickets past their limit."""
+def activities(url):
+    """What each open ticket's worker did lately, by ticket id, from the live view; only workers whose turn runs."""
+    rows = management(url, 'GET', 'live').get('tickets') or []
+    return {row['id']: row['activity'] for row in rows if row.get('turn') and (row.get('activity') or {}).get('lastAt')}
+
+
+def findings(url, now, warn, stop, quiet):
+    """`[(ticket, kind, minutes)]`: kind is `quiet`, `running`, `stop`, `queued` or a person's action, past its limit."""
     found = []
+    acting = activities(url)
     for ticket in listed(url, 'working'):
         if ticket.get('action') == 'queued':
             minutes = (now - parse_time(ticket['createdAt'])).total_seconds() / 60
@@ -78,8 +87,12 @@ def findings(url, now, warn, stop):
         if not started:
             continue
         minutes = (now - max(started)).total_seconds() / 60
+        activity = acting.get(ticket['id'])
+        still = (now - parse_time(activity['lastAt'])).total_seconds() / 60 if activity else 0
         if minutes >= stop:
             found.append((ticket, 'stop', minutes))
+        elif still >= quiet:
+            found.append(({**ticket, 'activity': activity}, 'quiet', still))
         elif minutes >= warn:
             found.append((ticket, 'running', minutes))
     for ticket in listed(url, 'person'):
@@ -94,6 +107,10 @@ def line(ticket, kind, minutes, panel):
     where = f'（[面板]({panel.rstrip("/")}/)，工单 `{ticket["id"][:8]}`）' if panel else f'（工单 `{ticket["id"][:8]}`）'
     if kind == 'stop':
         return f'- **已停止** {title}：worker 跑了 {minutes:.0f} 分钟还没交报告，停掉以腾出位置；这条告警没有分析，需要人看{where}'
+    if kind == 'quiet':
+        tool = (ticket.get('activity') or {}).get('lastTool') or {}
+        last = f'，最后调用 `{tool["name"]}`' + (f'：`{tool["detail"].replace("`", "")}`' if tool.get('detail') else '') if tool else ''
+        return f'- {title}：worker 已 {minutes:.0f} 分钟没有动作{last}，可能卡住了{where}'
     if kind == 'running':
         return f'- {title}：worker 已跑 {minutes:.0f} 分钟（平时 5 分钟内交报告）{where}'
     if kind == 'queued':
@@ -119,6 +136,7 @@ def main():
     parser.add_argument('--panel-url', default='', help='the panel address people open, linked from each line')
     parser.add_argument('--warn-minutes', type=float, default=15)
     parser.add_argument('--stop-minutes', type=float, default=30)
+    parser.add_argument('--quiet-minutes', type=float, default=10, help='minutes with no action in a running turn')
     parser.add_argument('--state', type=Path, default=Path.home() / '.local' / 'state' / 'oncall-watchdog.json')
     parser.add_argument('--dry-run', action='store_true', help='print what it would post and stop; change nothing')
     args = parser.parse_args()
@@ -129,6 +147,8 @@ def main():
             raise Invalid('--url must be the loopback management API, such as http://127.0.0.1:3082')
         if not 0 < args.warn_minutes < args.stop_minutes:
             raise Invalid('--warn-minutes must be positive and below --stop-minutes')
+        if args.quiet_minutes <= 0:
+            raise Invalid('--quiet-minutes must be positive')
         if args.panel_url and not args.panel_url.startswith('https://'):
             raise Invalid('--panel-url must be an https:// address')
     except Invalid as error:
@@ -140,7 +160,7 @@ def main():
     except ValueError:
         notified = {}
     try:
-        found = findings(args.url, now, args.warn_minutes, args.stop_minutes)
+        found = findings(args.url, now, args.warn_minutes, args.stop_minutes, args.quiet_minutes)
         new = [(ticket, kind, minutes) for ticket, kind, minutes in found if kind not in notified.get(ticket['id'], [])]
         if args.dry_run:
             for ticket, kind, minutes in new:

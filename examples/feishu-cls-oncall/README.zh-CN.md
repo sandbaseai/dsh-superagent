@@ -298,7 +298,7 @@ Check dsh-superagent: run `scripts/dsh-superagent --profile superagent status` i
 
 `PATH` 里要有 `dsh` 和 `tmux`，重启要用到。`--dry-run` 只打印要发的消息，不重启也不发。
 
-`scripts/oncall-watchdog` 每 5 分钟看一次进行中的工单：worker 跑了 15 分钟还没交报告、排队等 worker 超过 15 分钟、或报告卡住（blocked/failed）等人超过 15 分钟，各发一次消息；跑满 30 分钟就停掉这张工单，腾出 worker 给别的告警，并说明这条告警没有分析、需要人看。值班 worker 平时 5 分钟内交报告，这些阈值只抓出了问题的工单（`--warn-minutes`、`--stop-minutes` 可调）：
+`scripts/oncall-watchdog` 每 5 分钟看一次进行中的工单：worker 这一轮 10 分钟没有任何工具调用或模型回复（像是卡住了，消息里带上它最后调用的命令，只提醒不停）、worker 跑了 15 分钟还没交报告、排队等 worker 超过 15 分钟、或报告卡住（blocked/failed）等人超过 15 分钟，各发一次消息；跑满 30 分钟就停掉这张工单，腾出 worker 给别的告警，并说明这条告警没有分析、需要人看。值班 worker 平时 5 分钟内交报告，这些阈值只抓出了问题的工单（`--quiet-minutes`、`--warn-minutes`、`--stop-minutes` 可调）：
 
 ```sh
 */5 * * * * cd $HOME && python3 $HOME/dsh-superagent/scripts/oncall-watchdog --url http://127.0.0.1:<port> --chat <oc_...> --lark-cli $HOME/.local/bin/lark-bot >> $HOME/oncall-watchdog.log 2>&1
