@@ -351,7 +351,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/views/sources.ts` | The Source status: each Source instance's state, its last day's counts, and what it filtered and dropped in that day |
 | `src/app/views/settings.ts` | The settings page's view: each block with its revision, each Source's settings with its kind's form, and the execution environment |
 | `src/app/views/overview.ts` | The overview: Tickets that need a person, problems, the last day's flow and the Executor's load |
-| `src/app/views/live.ts` | The live view: whether the main Session runs, the Evals in progress, the last day's flow and each open Ticket with the worker slot, turn and shell jobs it holds (`DshExecutor.workers`), and the latest Ticket from Trigger to last Report |
+| `src/app/views/live.ts` | The live view: whether the main Session runs, the Evals in progress, the last day's flow and each open Ticket with the worker slot, turn and shell jobs it holds (`DshExecutor.workers`), and the latest Ticket from Trigger to last Report; `dayStats`, the last day's slot wait and time to report with Tickets per hour |
 | `src/executor/dsh.ts` | The DshExecutor, `WorkerSlots`, `ticketExecution`, `inputMessage` and `mandateInstructions` |
 | `src/executor/activity.ts` | `Activities`: what each worker and its subagents did lately (last tool, tool calls, failures, tokens, running subagents), from their Session events, for the live view |
 | `src/executor/background.ts` | A worker's background work in DeepSeek Harness, the shell jobs its Session owns (`ctx.jobs`) and its subagents (`ctx.subagents`): `runningJobs`, `untilQuiet`, `killJobs`, `collectJobs`, `stopSubagents`, `stopBackground`, `until`, and `cancelled`, the workers whose turn a stop of their subagents cancelled |
@@ -418,6 +418,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/feishu-read.spec.ts`, `tests/github-read.spec.ts` | Feishu and GitHub reads |
 | `tests/admission-context.spec.ts`, `tests/feishu-image.spec.ts` | The Thread window of assessments, and Feishu image reads |
 | `tests/assessment.spec.ts` | What the MasterAssessor keeps per Eval, and when it lets go |
+| `tests/live-stats.spec.ts` | The live view's last day: slot wait and time to report by first Assignment, and Tickets per hour |
 | `tests/activity.spec.ts` | What a worker did lately: its last tool and command, counts and tokens, its running subagents, and reading its Session once |
 | `tests/background.spec.ts` | Waiting for a worker's shell jobs and subagents: an end that woke it, and a host that stops |
 | `tests/bundle-patch.spec.ts` | The bundle's patch, read as DeepSeek Harness reads it, and the agent preset of Executor Sessions it defines |

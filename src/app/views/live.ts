@@ -25,6 +25,38 @@ function trace(view: Snapshot, ticket: Ticket) {
     endedAt: ticket.ended?.at }
 }
 
+const HOUR = 3_600_000
+/** A wait for a slot longer than this means the workers were all taken. */
+const WAITED_MS = 60_000
+const quantile = (sorted: number[], q: number) => sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))]! : 0
+const spread = (values: number[]) => {
+  const sorted = values.slice().sort((a, b) => a - b)
+  return { count: sorted.length, p50: quantile(sorted, 0.5), p95: quantile(sorted, 0.95) }
+}
+/**
+ * The last 24 hours of Tickets by their first Assignment: how long it waited for a slot, how long its worker took to its
+ * first Report that is not progress, and the Tickets opened in each hour with how many of them waited.
+ */
+export function dayStats(tickets: readonly Ticket[], now = Date.now()) {
+  const since = now - 24 * HOUR
+  const hours = Array.from({ length: 24 }, (_, index) => ({ at: new Date(since + index * HOUR).toISOString(), opened: 0, waited: 0 }))
+  const waits: number[] = [], works: number[] = []
+  for (const ticket of tickets) {
+    const created = Date.parse(ticket.createdAt)
+    if (!(created >= since)) continue
+    const hour = hours[Math.min(23, Math.floor((created - since) / HOUR))]!
+    hour.opened++
+    const first = ticket.assignments[0]
+    if (!first?.startedAt) continue
+    const wait = Date.parse(first.startedAt) - Date.parse(first.createdAt)
+    waits.push(wait)
+    if (wait > WAITED_MS) hour.waited++
+    const done = first.report && first.report.state !== 'progress' ? first.report.at : undefined
+    if (done) works.push(Date.parse(done) - Date.parse(first.startedAt))
+  }
+  return { wait: { ...spread(waits), waited: waits.filter(value => value > WAITED_MS).length }, work: spread(works), hours }
+}
+
 export function liveView(host: ViewHost, overview: OverviewView, workers: readonly WorkerActivity[], routerBusy: boolean,
   activity: (ticketIds: readonly string[]) => ReadonlyMap<string, Activity>) {
   const view = snapshot(host)
@@ -61,6 +93,7 @@ export function liveView(host: ViewHost, overview: OverviewView, workers: readon
     problems: problems.length,
     tickets: open, total,
     trace: latest ? trace(view, latest) : undefined,
+    day: dayStats(store.tickets.list()),
   }
 }
 export type LiveView = ReturnType<typeof liveView>
