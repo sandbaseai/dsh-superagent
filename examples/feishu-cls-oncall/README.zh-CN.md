@@ -306,7 +306,7 @@ Check dsh-superagent: run `scripts/dsh-superagent --profile superagent status` i
 
 ## 自动修复（可选）
 
-worker 确认一个靠改代码或配置就能解决的问题后，在分析回复末尾 @所有人 提议修复，写明问题、原因、要改什么和风险（“回复「修复」自动开 PR”）；群里任何名单内的人在话题里回复同意后，工单恢复，worker 才运行 `oncall-fix submit`：它在 SandBase Agents 上启动一个修复 Agent，由它在 GitHub 上开 PR；再由另一个审阅 Agent 读 PR，把阻塞问题写成 PR 评论，修复 Agent 按评论在同一分支上改，最多审阅两轮。审阅通过后**由人合并**。每一步需要人知道的结果都回复在告警所在的话题里。能改哪些仓库由 SandBase Agents 的 GitHub 授权决定，这个工具不另设名单；一张工单只发起一次。
+worker 确认一个靠改代码或配置就能解决的问题后，在分析回复末尾 @所有人 提议修复，写明问题、原因、要改什么和风险（“回复「修复」自动开 PR”）；群里任何名单内的人在话题里回复同意后，工单恢复，worker 才运行 `oncall-fix submit`：它在 SandBase Agents 上启动一个修复 Agent，由它在 GitHub 上开 PR；再由另一个审阅 Agent 读 PR，把阻塞问题写成 PR 评论，修复 Agent 按评论在同一分支上改，最多审阅两轮。审阅通过后由人看过、在话题里说「合并」再由 Agent 合并；配置了发布的仓库合并后自动发布生产（见准备第 5 步）。每一步需要人知道的结果都回复在告警所在的话题里。能改哪些仓库由 SandBase Agents 的 GitHub 授权决定，这个工具不另设名单；一张工单只发起一次。
 
 准备：
 
@@ -318,7 +318,10 @@ worker 确认一个靠改代码或配置就能解决的问题后，在分析回�
 */5 * * * * cd $HOME && python3 $HOME/dsh-superagent/scripts/oncall-fix tick --url http://127.0.0.1:<port> --lark-cli $HOME/.local/bin/lark-bot >> $HOME/oncall-fix.log 2>&1
 ```
 
-`oncall-fix status` 列出所有修复和所处阶段；工单日报会统计过去 48 小时发起的修复，并列出等人合并和需要人看的 PR。
+4. 在 `fix.env` 加 `REPOSITORIES=owner/name@repository_id,...`，`repository_id` 是 `github_list_repositories` 返回的十进制 ID。列出的仓库，修复、审阅、设计和发布会话启动时都会把仓库克隆到 `/workspace`，Agent 在里面用 git 搜索、修改、跑测试、提交并推送到 `agents/<session>/…` 分支，再用 `github_open_pull_request` 开 PR；没列出的仓库仍用逐文件读写的工具。
+5. 可选，合并后自动发布生产：再加 `RELEASES=owner/name:.github/workflows/deploy.yaml`（仓库须在 `REPOSITORIES` 里，workflow 接受输入 `tag`，即 `v*`）。在 Console 给 GitHub 连接的工具上限加 `github_create_tag` 和 `github_dispatch_workflow`，把该 workflow 加进白名单（分支 main），并在修复 Agent 上显式勾选这两个工具。`oncall-fix merge` 合并成功后自动发布；人在 GitHub 上自己合并的，在话题里说「发布」，worker 运行 `oncall-fix release`。发布由修复 Agent 新开一个克隆了该仓库的会话完成：在 main 最新提交上打下一个 `vMAJOR.MINOR.PATCH`，以这个 tag 触发 workflow，等部署结束，结果回复到话题。发布的是整个 main，别人已合并还没发布的改动会一起上线；合并已包含在最新 tag 里时只回复“已上线”。PR 须以 merge commit 合并（squash 后原提交不在 main 上，会拒绝发布）。
+
+`oncall-fix status` 列出所有修复、所处阶段和发布的 tag；工单日报会统计过去 48 小时发起的修复，并列出等人合并和需要人看的 PR。
 
 ## 故障排查
 
