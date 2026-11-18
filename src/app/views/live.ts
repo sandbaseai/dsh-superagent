@@ -57,6 +57,19 @@ export function dayStats(tickets: readonly Ticket[], now = Date.now()) {
   return { wait: { ...spread(waits), waited: waits.filter(value => value > WAITED_MS).length }, work: spread(works), hours }
 }
 
+/** How many ended Tickets the view lists, newest end first. */
+const RECENT = 10
+/** The latest ended Tickets: how each ended, how long from its Trigger to its end, and what its worker last said. */
+export function recentEnded(view: Snapshot, tickets: readonly Ticket[]) {
+  return tickets.filter(ticket => ticket.ended).sort((a, b) => b.ended!.at.localeCompare(a.ended!.at)).slice(0, RECENT).map(ticket => {
+    const trigger = view.store.triggers.get(ticket.origin.triggerId)
+    const report = latestReport(ticket)
+    return { id: ticket.id, title: ticket.title, source: ticket.channels[0]?.source, outcome: ticket.ended!.outcome, by: ticket.ended!.by,
+      endedAt: ticket.ended!.at, took: Date.parse(ticket.ended!.at) - Date.parse(trigger?.at ?? ticket.createdAt),
+      report: report && { state: report.state, summary: preview(report.summary.split('\n')[0] ?? '') } }
+  })
+}
+
 export function liveView(host: ViewHost, overview: OverviewView, workers: readonly WorkerActivity[], routerBusy: boolean,
   activity: (ticketIds: readonly string[]) => ReadonlyMap<string, Activity>) {
   const view = snapshot(host)
@@ -94,6 +107,7 @@ export function liveView(host: ViewHost, overview: OverviewView, workers: readon
     tickets: open, total,
     trace: latest ? trace(view, latest) : undefined,
     day: dayStats(store.tickets.list()),
+    recent: recentEnded(view, store.tickets.list()),
   }
 }
 export type LiveView = ReturnType<typeof liveView>

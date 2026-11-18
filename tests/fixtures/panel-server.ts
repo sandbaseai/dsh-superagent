@@ -226,6 +226,10 @@ export const liveView = (): ApiResponse<'GET live'> => ({
   day: { wait: { count: 20, p50: 2000, p95: 190_000, waited: 3 }, work: { count: 18, p50: 250_000, p95: 610_000 },
     hours: Array.from({ length: 24 }, (_, index) => ({ at: new Date(Date.UTC(2026, 8, 21, index)).toISOString(), opened: index % 5,
       waited: index === 9 ? 2 : index === 14 ? 1 : 0 })) },
+  recent: [{ id: 't8', title: '订单服务 5xx 告警', source: 'feishu', outcome: 'completed', by: 'executor', endedAt: '2026-09-22T00:10:00Z',
+    took: 200_000, report: { state: 'ready', summary: '上游 provider 限流，已自动恢复' } },
+  { id: 't9', title: '#130 拼写', source: 'github', outcome: 'stopped', by: 'human', endedAt: '2026-09-22T00:08:00Z', took: 45_000,
+    report: undefined }],
 })
 export const acceptDecision = (): NonNullable<TicketPageView['decision']> => ({ id: 'd1', kind: 'accept', outcome: 'accept',
   reason: [{ code: 'explicitRouted' }], at: '2026-09-22T00:00:00Z', strength: 'explicit', ticketId: undefined,

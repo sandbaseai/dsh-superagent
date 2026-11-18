@@ -552,7 +552,7 @@ it('answers the live view with the Router, the flow and each open Ticket on the 
   const { status, body } = await api('GET', 'live')
   expect(status).toBe(200)
   expect(body).toMatchObject({ router: { busy: expect.any(Boolean), evaluating: [], overdue: 0, unavailable: 0 },
-    executor: { maxWorkers: 3, paused: false, person: 0 }, outbox: { failing: 0 }, total: 1,
+    executor: { maxWorkers: 3, paused: false, person: 0 }, outbox: { failing: 0 }, total: 1, recent: [],
     tickets: [{ id: ticket.id, title: '修复回归', stage: 'working', jobs: 0, sessionId: `worker-${ticket.id}` }] })
   const row = (body as { tickets: { slot: boolean; turn: boolean }[] }).tickets[0]!
   // A worker whose turn runs holds a slot; one that does not hold a slot has no turn.
