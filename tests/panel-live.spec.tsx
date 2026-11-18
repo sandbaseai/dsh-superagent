@@ -47,6 +47,17 @@ it('shows the last day\'s slot wait and time to report, with each hour\'s Ticket
   expect(all('.dt-live-hour-bar > span')).toHaveLength(2)
 })
 
+it('lists the recently ended Tickets with how each ended and how long it took, linking to each', async () => {
+  at({ page: 'live' })
+  await mount()
+  const section = all('.dt-section').find(item => item.textContent?.startsWith(zh.liveRecentTitle))!
+  expect([...section.querySelectorAll('.dt-row-meta > span:first-child')].map(item => item.textContent)).toEqual(['已完成', '人工停止'])
+  expect(section.textContent).toContain('从触发到结束 3 分钟')
+  expect(section.textContent).toContain('上游 provider 限流，已自动恢复')
+  await click('#130 拼写')
+  expect(server.requests.some(request => request.path === 'tickets/t9')).toBe(true)
+})
+
 it('opens the Router\'s main Session and each worker\'s Session from its card', async () => {
   at({ page: 'live' })
   await mount()

@@ -17,7 +17,7 @@ The tabs follow the workflow: **Overview**, **Live**, **Source**, **Trigger**, *
 | Tab | Shows |
 | --- | --- |
 | Overview | Tickets needing action, system problems, activity counts for the last 24 hours, and Executor load. Each block links to its detailed page |
-| Live | Sources, the Router and one row per worker slot as linked cards, the state in one sentence, how the latest Ticket went from Trigger to its last Report, the last day's slot wait and time to report with Tickets per hour, the Evals in progress and every open Ticket by what its worker does. It refreshes every 2 seconds |
+| Live | Sources, the Router and one row per worker slot as linked cards, the state in one sentence, how the latest Ticket went from Trigger to its last Report, the last day's slot wait and time to report with Tickets per hour, the last ten ended Tickets, the Evals in progress and every open Ticket by what its worker does. It refreshes every 2 seconds |
 | Source | Source state, setup problems and non-zero counts. Filtered Triggers and dropped messages cover the same 24-hour window as Overview |
 | Trigger | Threads filtered by Subscribed, Evaluating, New Triggers in 24 h, or All Threads. Each Thread shows its Triggers newest first, Decisions and Subscriptions |
 | Eval | Decisions with their reason and matched rules |

@@ -175,6 +175,8 @@ const TEXT = {
   liveWaited: ['等过工位', 'Waited for a slot'],
   liveHoursLabel: ['每小时新开的工单和其中等过工位的', 'Tickets opened each hour and those that waited for a slot'],
   liveHourTip: ['{hour} 点：{opened} 个工单，{waited} 个等过工位', '{hour}:00: {opened} Tickets, {waited} waited for a slot'],
+  liveRecentTitle: ['最近结束的工单', 'Recently ended Tickets'],
+  liveTookTotal: ['从触发到结束 {time}', '{time} from Trigger to end'],
   'live.turn': ['运行中', 'Running'],
   'live.background': ['后台任务中', 'Background work'],
   'live.person': ['等人处理', 'Waiting for a person'],

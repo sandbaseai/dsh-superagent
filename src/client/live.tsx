@@ -15,6 +15,7 @@ export const QUIET_MS = 5 * 60_000
 type Row = LiveView['tickets'][number]
 type Trace = NonNullable<LiveView['trace']>
 type Day = LiveView['day']
+type Ended = LiveView['recent'][number]
 export type WorkState = 'turn' | 'background' | 'person' | 'queued' | 'idle'
 
 export const workState = (row: Row): WorkState => row.slot ? row.turn ? 'turn' : 'background'
@@ -186,6 +187,27 @@ function DayView({ day }: { day: Day }) {
   </Section>
 }
 
+const OUTCOME_DOT = { completed: 'done', merged: 'done', dropped: 'idle', closed: 'warning', stopped: 'error' } as const
+function RecentRow({ item }: { item: Ended }) {
+  const { t, navigate } = usePanel()
+  return <li className="dt-row dt-link">
+    <div className="dt-row-main">
+      <div className="dt-row-title">
+        <Dot state={OUTCOME_DOT[item.outcome]} label={t(`outcome.${item.outcome}`)} />
+        <button type="button" className="dt-open" onClick={() => navigate({ page: 'execution', id: item.id })}>
+          {readableMarkers(t, item.title)}</button>
+      </div>
+      <div className="dt-row-meta">
+        <span>{t(`outcome.${item.outcome}`)}</span>
+        {item.source && <span>{valueLabel(t, 'source', item.source)}</span>}
+        <span>{t('liveTookTotal', { time: duration(t, item.took) })}</span>
+        <When at={item.endedAt} />
+      </div>
+      {item.report?.summary && <div className="dt-row-quote">{item.report.summary}</div>}
+    </div>
+  </li>
+}
+
 function TicketRow({ row }: { row: Row }) {
   const { t, navigate } = usePanel()
   const state = workState(row)
@@ -233,5 +255,10 @@ export function LivePage() {
         : <Hint>{t('liveNone')}</Hint>}
       {data.total > data.tickets.length && <Hint>{t('liveMore', { count: data.total - data.tickets.length })}</Hint>}
     </Section>
+    {data.recent.length > 0 && <Section title={t('liveRecentTitle')} count={data.recent.length}
+      action={<button type="button" className="dt-textlink dt-more-link"
+        onClick={() => navigate({ page: 'execution', query: { filter: 'ended' } })}>{t('details')}</button>}>
+      <ul className="dt-list">{data.recent.map(item => <RecentRow key={item.id} item={item} />)}</ul>
+    </Section>}
   </>
 }
