@@ -573,10 +573,12 @@ def command_release(args, config):
         fix = waiting[0]
         release = config['releases'].get(fix['repository'].lower())
         if not release:
-            print(json.dumps({'refused': f'{fix["repository"]} is not released by oncall-fix: a person releases it', 'pr_url': fix['pr_url']}, ensure_ascii=False))
+            why = f'{fix["repository"]} is not released by oncall-fix: a person releases it'
+            print(json.dumps({'refused': why, 'pr_url': fix['pr_url']}, ensure_ascii=False))
             return 2
         if fix.get('release_attempts', 0) >= MAX_RELEASES:
-            print(json.dumps({'refused': f'{MAX_RELEASES} release attempts did not start a release: a person releases it', 'pr_url': fix['pr_url']}, ensure_ascii=False))
+            why = f'{MAX_RELEASES} release attempts did not start a release: a person releases it'
+            print(json.dumps({'refused': why, 'pr_url': fix['pr_url']}, ensure_ascii=False))
             return 2
         if not SHA.match(fix.get('merge_sha') or fix.get('head_sha') or (fix.get('verdicts') or [{}])[-1].get('head_sha') or ''):
             print(json.dumps({'refused': 'the review recorded no head commit, so a person releases it', 'pr_url': fix['pr_url']}, ensure_ascii=False))
