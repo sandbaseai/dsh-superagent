@@ -48,8 +48,12 @@ export interface Candidate {
   nearby?: Ticket[]
 }
 
+/** Why an explicit request may be ignored without a reply: it repeats one, it was answered already, or it is chat. */
+export const QUIET_REASONS = ['duplicate', 'answered', 'discussion'] as const
+export type QuietReason = typeof QUIET_REASONS[number]
 export type AssessmentOutcome =
-  | { kind: 'ignore'; reason: string | Reason; audit?: Record<string, unknown> }
+  /** An ignore of an explicit request either answers its sender with `reply` or names why it stays `quiet`. */
+  | { kind: 'ignore'; reason: string | Reason; audit?: Record<string, unknown>; reply?: string; quiet?: QuietReason }
   | { kind: 'unavailable'; reason: string | Reason; audit?: Record<string, unknown> }
   /** An accept: `rules` the assessment matched, `name` the ticket's requested short name, and `note` a routing note for its worker. */
   | { kind: 'accept'; title: string; scope: string; reason: string | Reason; acknowledgement?: string; rules?: string[]; audit?: Record<string, unknown>;

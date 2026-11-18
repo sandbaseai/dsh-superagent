@@ -99,7 +99,7 @@ describe('eval', () => {
   it('releases the assessor\'s state for every eval that ends, decided or not', async () => {
     const h = harness()
     h.engine.receive(trigger('1')); h.pump()
-    h.decide(h.requests[0]!, { kind: 'ignore', reason: 'chatter' })
+    h.decide(h.requests[0]!, { kind: 'ignore', reason: 'chatter', quiet: 'discussion' })
     expect(h.assessor.release).toHaveBeenCalledExactlyOnceWith(h.requests[0]!.evalId)
   })
   it('serializes evals per thread and debounces triggers that arrive meanwhile', async () => {
@@ -108,7 +108,7 @@ describe('eval', () => {
     h.engine.receive(trigger('2')); h.engine.receive(trigger('3')); h.pump()
     expect(h.requests).toHaveLength(1)
     expect(h.repo.threads.get('chat:t1')?.pending).toEqual(['2', '3'])
-    h.decide(h.requests[0]!, { kind: 'ignore', reason: 'chatter' })
+    h.decide(h.requests[0]!, { kind: 'ignore', reason: 'chatter', quiet: 'discussion' })
     h.pump()
     expect(h.requests[1]!.triggers.map(t => t.id)).toEqual(['2', '3'])
     expect(h.requests[1]!.strength).toBe('explicit')
@@ -131,8 +131,8 @@ describe('eval', () => {
     const first = h.requests[0]!
     h.setVersion('v2'); h.engine.policyChanged('v1', 'v2'); h.pump()
     const second = h.requests[1]!
-    expect(() => h.decide(first, { kind: 'ignore', reason: 'chatter' })).toThrow('has finished or a later eval replaced it')
-    expect(h.decide(second, { kind: 'ignore', reason: 'chatter' })).toMatchObject({ kind: 'ignore', evalId: second.evalId })
+    expect(() => h.decide(first, { kind: 'ignore', reason: 'chatter', quiet: 'discussion' })).toThrow('has finished or a later eval replaced it')
+    expect(h.decide(second, { kind: 'ignore', reason: 'chatter', quiet: 'discussion' })).toMatchObject({ kind: 'ignore', evalId: second.evalId })
   })
   it('records an accept with its ticket, subscriptions and acknowledgement together, or none of them', async () => {
     const h = harness({}, { prepareTicket: () => { throw new Error('No directory for the ticket') } })
@@ -165,7 +165,7 @@ describe('eval', () => {
     h.decide(h.requests.at(-1)!, { kind: 'accept', title: 'PR', scope: 'small', reason: 'requested', acknowledgement: 'ok' }); h.settle()
     h.engine.receive(trigger('5', { threads: [{ source: 'chat', id: 'D' }] })); h.pump()
     expect(h.requests.at(-1)!.nearby?.map(ticket => ticket.id)).toEqual([second, first])
-    h.decide(h.requests.at(-1)!, { kind: 'ignore', reason: 'chatter' })
+    h.decide(h.requests.at(-1)!, { kind: 'ignore', reason: 'chatter', quiet: 'discussion' })
     h.tick(30 * 60)
     h.engine.receive(trigger('7', { threads: [{ source: 'chat', id: 'E' }] })); h.pump()
     expect(h.requests.at(-1)!).not.toHaveProperty('nearby')
@@ -404,7 +404,7 @@ describe('follow-ups', () => {
     expect(h.engine.decide('3', { kind: 'stop', ticketId: decision.ticketId!, reason: 'stop it' })).toMatchObject({ kind: 'stop',
       triggerIds: ['3'] })
     expect(h.repo.threads.get('chat:t1')!.evaluating).toEqual(evaluating)
-    expect(h.decide(h.requests.at(-1)!, { kind: 'ignore', reason: 'chat' })).toMatchObject({ kind: 'ignore', triggerIds: ['2'] })
+    expect(h.decide(h.requests.at(-1)!, { kind: 'ignore', reason: 'chat', quiet: 'discussion' })).toMatchObject({ kind: 'ignore', triggerIds: ['2'] })
   })
   it('leaves the Thread free for a later request that reaches no ticket', () => {
     const h = harness()
@@ -426,7 +426,7 @@ describe('hand-back', () => {
     expect(h.engine.handback(ticketId, '2', 'A new request')).toBe(true); h.pump()
     expect(h.requests.at(-1)).toMatchObject({ strength: 'explicit', triggers: [{ id: '2' }] })
     expect(h.repo.triggers.disposition('2')!.handbacks).toEqual([{ ticketId, reason: 'A new request', at: expect.any(String) }])
-    h.decide(h.requests.at(-1)!, { kind: 'ignore', reason: 'chat' })
+    h.decide(h.requests.at(-1)!, { kind: 'ignore', reason: 'chat', quiet: 'discussion' })
     expect(() => h.engine.handback(ticketId, '2', 'Again')).toThrow(new UserError('handedBack'))
     expect(h.engine.handback(ticketId, '3', 'A guest asks for more')).toBe(true); h.pump()
     expect(h.requests.at(-1)).toMatchObject({ strength: 'inferred', triggers: [{ id: '3' }] })
@@ -442,7 +442,7 @@ describe('hand-back', () => {
     h.engine.followForContext(ticketId, { source: 'chat', id: 'issue' })
     h.engine.receive(trigger('2')); h.engine.reevaluate('2')
     h.engine.receive(trigger('3', { human: false })); h.engine.receive(trigger('4', { threads: [{ source: 'chat', id: 'issue' }] })); h.pump()
-    for (const candidate of h.requests.slice(-2)) h.decide(candidate, { kind: 'ignore', reason: 'chat' })
+    for (const candidate of h.requests.slice(-2)) h.decide(candidate, { kind: 'ignore', reason: 'chat', quiet: 'discussion' })
     // Each went to Eval without the ticket, and its Decision stands.
     for (const id of ['2', '3', '4']) expect(h.engine.handback(ticketId, id, 'Not this ticket')).toBe(false)
     expect([h.repo.threads.get('chat:t1')!.pending, h.repo.threads.get('chat:issue')!.pending]).toEqual([[], []])
@@ -707,7 +707,7 @@ describe('follow-up owners', () => {
     expect(h.repo.threads.get('chat:t1')!.pending).toEqual([])
     // The main Session may neither take nor dismiss it while the second ticket's worker decides it.
     expect(() => h.engine.decide('3', accept)).toThrow(decides(second))
-    expect(() => h.engine.decide('3', { kind: 'ignore', reason: 'chat' })).toThrow(decides(second))
+    expect(() => h.engine.decide('3', { kind: 'ignore', reason: 'chat', quiet: 'discussion' })).toThrow(decides(second))
     expect(h.engine.handback(second, '3', 'neither ticket')).toBe(true)
     expect(h.repo.threads.get('chat:t1')!.pending).toEqual(['3'])
   })
@@ -719,7 +719,7 @@ describe('follow-up owners', () => {
     h.repo.threads.save({ ...thread, evaluating: { id: 'e-legacy', threadKey: 'chat:t1', triggerIds: ['2'], strength: 'explicit',
       actor: member, basis: { via: 'listed' }, policyVersion: 'v1', startedAt: '2026-09-23T00:00:00Z', deadline: '2026-09-24T00:00:00Z' } })
     expect(followupOwners(trigger('2'), h.repo)).toEqual([])
-    expect(h.engine.decide('2', { kind: 'ignore', reason: 'chat', evalId: 'e-legacy' })).toMatchObject({ kind: 'ignore',
+    expect(h.engine.decide('2', { kind: 'ignore', reason: 'chat', quiet: 'discussion', evalId: 'e-legacy' })).toMatchObject({ kind: 'ignore',
       triggerIds: ['2'] })
     expect(h.repo.tickets.get(ticketId)!.ended).toBeUndefined()
   })
@@ -1639,10 +1639,21 @@ describe('ignores from the card', () => {
       .toMatchObject({ reason: [said('Plain chat.')], audit: { rule_assessments: [] } })
     // An explicit candidate is always routed from its card.
     h.engine.receive(trigger('4', { threads: [{ source: 'chat', id: 't9' }] })); h.pump()
-    expect(h.engine.decide('4', { kind: 'ignore', reason: 'Thanks.' }).reason).toEqual([said('Thanks.')])
+    expect(h.engine.decide('4', { kind: 'ignore', reason: 'Thanks.', quiet: 'discussion' }).reason).toEqual([said('Thanks.')])
     // Accepting an inferred candidate still takes an assessment's matched rules.
     h.engine.receive(trigger('5', { actor: guest })); h.engine.reevaluate('5'); h.pump()
     expect(() => h.engine.decide('5', { kind: 'accept', title: 'Fix', scope: 'small', reason: 'chat' })).toThrow(new UserError('notExplicit'))
+  })
+  it('answers a person whose explicit request it ignores, unless it says why the ignore stays quiet', () => {
+    const h = harness()
+    h.engine.receive(trigger('1')); h.pump()
+    expect(() => h.engine.decide('1', { kind: 'ignore', reason: 'Needs a design.' })).toThrow(new UserError('silentIgnore'))
+    expect(() => h.engine.decide('1', { kind: 'ignore', reason: 'Needs a design.', reply: '  ' })).toThrow(new UserError('silentIgnore'))
+    expect(h.engine.decide('1', { kind: 'ignore', reason: 'Needs a design.', reply: '这个要先出设计方案。' })).toMatchObject({ kind: 'ignore' })
+    expect(h.outbox).toEqual([{ id: key('decline', '1'), channel: trigger('1').channel, text: '这个要先出设计方案。', kind: 'reply' }])
+    h.engine.receive(trigger('2', { threads: [{ source: 'chat', id: 't2' }] })); h.pump()
+    expect(h.engine.decide('2', { kind: 'ignore', reason: 'Thanks.', quiet: 'discussion' })).toMatchObject({ kind: 'ignore' })
+    expect(h.outbox).toHaveLength(1)
   })
 })
 

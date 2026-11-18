@@ -171,7 +171,15 @@ export class Evals extends EnginePart {
     if (outcome.kind === 'accept' && evaluation.strength !== 'explicit' && !this.policy().admitsInferred(outcome.rules ?? [])) {
       throw new UserError('notExplicit')
     }
-    return this.decideEval(thread, evaluation, outcome)
+    // An assessment's ignore carries its audit; a routed ignore of a person's request must not leave them waiting.
+    const silent = outcome.kind === 'ignore' && !outcome.audit && !outcome.reply?.trim() && !outcome.quiet
+    if (silent && evaluation.strength === 'explicit') throw new UserError('silentIgnore')
+    const decision = this.decideEval(thread, evaluation, outcome)
+    if (decision.kind === 'ignore' && outcome.kind === 'ignore' && outcome.reply?.trim() && evaluation.strength === 'explicit'
+      && trigger.channel && trigger.human) {
+      this.options.outbox.send({ id: key('decline', trigger.id), channel: trigger.channel, text: outcome.reply.trim(), kind: 'reply' })
+    }
+    return decision
   }
   /**
    * Queue a stored Trigger for a fresh Eval on its primary Thread and emit `trigger.requeued`; returns false while an Eval holds it.
