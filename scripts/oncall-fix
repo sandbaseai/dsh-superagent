@@ -33,11 +33,13 @@ config file (mode 0600):
 Which repositories can be changed is the Agents' GitHub authorization; this tool keeps no list. A ticket gets one fix, and
 at most three requests in all, one at a time; a design is asked for again only while none has opened a pull request.
 
-  oncall-fix submit [--kind fix|design] --repository owner/name --brief FILE [--ticket ID]   (ticket: $DSH_SUPERAGENT_TICKET)
-  oncall-fix merge [--pr NUMBER] [--ticket ID]   (when a person on the thread asked to merge a ready pull request)
-  oncall-fix release [--pr NUMBER] [--ticket ID]   (when a person on the thread merged a pull request and asks to release it)
+  oncall-fix submit [--kind fix|design] --repository owner/name --brief FILE [--by OPEN_ID] [--ticket ID]   (ticket: $DSH_SUPERAGENT_TICKET)
+  oncall-fix merge [--pr NUMBER] [--by OPEN_ID] [--ticket ID]   (when a person on the thread asked to merge a ready pull request)
+  oncall-fix release [--pr NUMBER] [--by OPEN_ID] [--ticket ID]   (when a person on the thread merged a pull request and asks to release it)
   oncall-fix tick [--url http://127.0.0.1:3082] [--lark-cli lark-bot] [--dry-run]
   oncall-fix status
+
+--by is the open_id of the person who asked; replies that need a person mention them, and no one else.
 
 Exit 0 on success, 1 when SandBase, the management API or Feishu failed, 2 for a bad argument or a refused submit.
 """
@@ -76,8 +78,7 @@ KINDS = {
     'design': {'agent': 'DEV_AGENT_ID', 'name': '设计方案', 'pr': '设计方案 PR', 'who': '开发 Agent'},
 }
 SHANGHAI = datetime.timezone(datetime.timedelta(hours=8))
-# Mentions everyone in the chat: a fix waits for whoever is on call to merge or decide.
-EVERYONE = '<at user_id="all"></at> '
+OPEN_ID = re.compile(r'^ou_[A-Za-z0-9]+$')
 
 
 class Refused(Exception):
@@ -350,6 +351,11 @@ def notify(args, fix, text):
         raise Failed(f'lark-cli reply exited {result.returncode}: {(result.stderr or result.stdout).strip()[-300:]}')
 
 
+def mention(fix):
+    """Mentions the person who last asked on the thread for this request, or no one."""
+    return f'<at user_id="{fix["by"]}"></at> ' if OPEN_ID.match(fix.get('by') or '') else ''
+
+
 def short(text, limit=300):
     text = re.sub(r'\s+', ' ', text).strip()
     return text if len(text) <= limit else text[:limit] + '…'
@@ -361,7 +367,7 @@ def advance(args, agents, fix):
     if datetime.datetime.fromisoformat(fix['since']) < now() - datetime.timedelta(hours=STAGE_HOURS):
         work = '发布' if fix['stage'] == 'releasing' else kind['name']
         fix.update(stage='failed', since=stamp(), reason=f'stage {fix["stage"]} took more than {STAGE_HOURS} h')
-        notify(args, fix, EVERYONE + f'**{work}超时**：{STAGE_HOURS} 小时没有进展，需要人看。' + (f'PR：{fix["pr_url"]}' if fix.get('pr_url') else ''))
+        notify(args, fix, mention(fix) + f'**{work}超时**：{STAGE_HOURS} 小时没有进展，需要人看。' + (f'PR：{fix["pr_url"]}' if fix.get('pr_url') else ''))
         return True
     if fix['stage'] in ('fixing', 'revising'):
         status, items = settled(agents, fix['fix_session'], fix.get('fix_answer'))
@@ -369,14 +375,15 @@ def advance(args, agents, fix):
             return False
         if status == 'failed':
             fix.update(stage='failed', since=stamp(), reason='the fix Session failed')
-            notify(args, fix, EVERYONE + f'**{kind["name"]}失败**：{kind["who"]}的会话出错，需要人看。' + (f'PR：{fix["pr_url"]}' if fix.get('pr_url') else ''))
+            notify(args, fix, mention(fix) + f'**{kind["name"]}失败**：{kind["who"]}的会话出错，需要人看。'
+                   + (f'PR：{fix["pr_url"]}' if fix.get('pr_url') else ''))
             return True
         fix['fix_answer'], answer = latest_answer(items)
         if fix['stage'] == 'fixing':
             url, number = pull_request(items)
             if not url:
                 fix.update(stage='no_pr', since=stamp(), reason=short(answer, 500))
-                notify(args, fix, EVERYONE + f'**{kind["name"]}没有开 PR**：{short(answer)}')
+                notify(args, fix, mention(fix) + f'**{kind["name"]}没有开 PR**：{short(answer)}')
                 return True
             fix.update(pr_url=url, pr_number=number)
             notify(args, fix, f'**已提交{kind["pr"]}**：{url}\n正在自动审阅，结果会回复在这里。')
@@ -394,19 +401,19 @@ def advance(args, agents, fix):
         result = verdict(answer) if status == 'done' else None
         if result is None:
             fix.update(stage='needs_human', since=stamp(), reason='the review gave no verdict')
-            notify(args, fix, EVERYONE + f'**自动审阅没有给出结论**，需要人审阅：{fix["pr_url"]}')
+            notify(args, fix, mention(fix) + f'**自动审阅没有给出结论**，需要人审阅：{fix["pr_url"]}')
             return True
         fix['verdicts'] = fix.get('verdicts', []) + [{k: result.get(k) for k in ('verdict', 'risk', 'head_sha', 'summary')}]
         summary = short(str(result.get('summary', '')))
         if result['verdict'] == 'approve':
             fix.update(stage='ready', since=stamp())
             risk = '低' if result.get('risk') == 'low' else '高'
-            notify(args, fix, EVERYONE + f'**审阅通过，等人合并**（{risk}风险，第 {fix["round"]} 轮）：{fix["pr_url"]}\n{summary}\n'
+            notify(args, fix, mention(fix) + f'**审阅通过，等人合并**（{risk}风险，第 {fix["round"]} 轮）：{fix["pr_url"]}\n{summary}\n'
                    '看过后在本话题 @我 回复「合并」，由 Agent 合并' + ('，合并后自动发布生产。' if fix['repository'].lower() in args.releases else '。'))
             return True
         if fix['round'] >= args.max_rounds:
             fix.update(stage='needs_human', since=stamp(), reason=f'{fix["round"]} review rounds left blockers')
-            notify(args, fix, EVERYONE + f'**{fix["round"]} 轮审阅后仍有阻塞问题**，需要人看：{fix["pr_url"]}\n{summary}')
+            notify(args, fix, mention(fix) + f'**{fix["round"]} 轮审阅后仍有阻塞问题**，需要人看：{fix["pr_url"]}\n{summary}')
             return True
         agents.send(fix['fix_session'], f'Review round {fix["round"]} comments were posted on pull request #{fix["pr_number"]}. Read them and address '
                     'the blockers of the latest oncall-review comment on the same branch.', f'oncall-fix-{tag(fix)}-revise-{fix["round"]}')
@@ -418,13 +425,13 @@ def advance(args, agents, fix):
             return False
         if status == 'failed':
             fix.update(stage='ready', since=stamp(), reason='the merge turn failed')
-            notify(args, fix, EVERYONE + f'**没有合并**：{kind["who"]}的会话出错，需要人看：{fix["pr_url"]}')
+            notify(args, fix, mention(fix) + f'**没有合并**：{kind["who"]}的会话出错，需要人看：{fix["pr_url"]}')
             return True
         fix['fix_answer'], answer = latest_answer(items)
         sha = merged(items, fix['pr_number'])
         if sha is None:
             fix.update(stage='ready', since=stamp(), reason=short(answer, 500))
-            notify(args, fix, EVERYONE + f'**没有合并**：{short(answer)}\n{fix["pr_url"]}')
+            notify(args, fix, mention(fix) + f'**没有合并**：{short(answer)}\n{fix["pr_url"]}')
             return True
         fix.update(stage='merged', since=stamp(), merge_sha=sha)
         release = args.releases.get(fix['repository'].lower())
@@ -471,7 +478,7 @@ def follow_release(args, agents, fix):
         else:
             result = run.get('conclusion') if run else '没有等到结果'
             fix.update(stage='release_failed', since=stamp(), run_url=url, reason=f'deploy run: {result}')
-            notify(args, fix, EVERYONE + f'**发布 {fix["release_tag"]} 未成功**（{result}），需要人看：{url}')
+            notify(args, fix, mention(fix) + f'**发布 {fix["release_tag"]} 未成功**（{result}），需要人看：{url}')
         return True
     shipped = re.search(r'"already_released"\s*:\s*"(v\d+\.\d+\.\d+)"', answer)
     if status == 'done' and shipped and not created and not fix.get('release_tag'):
@@ -480,7 +487,7 @@ def follow_release(args, agents, fix):
         return True
     why = short(answer) if status == 'done' else '发布会话出错'
     fix.update(stage='merged', since=stamp(), reason=short(answer, 500) if status == 'done' else 'the release Session failed')
-    notify(args, fix, EVERYONE + f'**没有发布**：{why}' + (f'\n已打 tag {fix["release_tag"]}，重试会直接用它触发部署。' if fix.get('release_tag') else '')
+    notify(args, fix, mention(fix) + f'**没有发布**：{why}' + (f'\n已打 tag {fix["release_tag"]}，重试会直接用它触发部署。' if fix.get('release_tag') else '')
            + f'\n{fix["pr_url"]}')
     return True
 
@@ -501,6 +508,11 @@ def refusal(mine, kind):
     return None
 
 
+def asker(args):
+    if args.by and not OPEN_ID.match(args.by):
+        raise Refused('--by must be the open_id (ou_...) of the person who asked')
+
+
 def command_submit(args, config):
     ticket = args.ticket or os.environ.get('DSH_SUPERAGENT_TICKET', '')
     if not TICKET.match(ticket):
@@ -516,6 +528,7 @@ def command_submit(args, config):
     agent = config.get(KINDS[args.kind]['agent'])
     if not agent:
         raise Refused(f'{args.config} lacks {KINDS[args.kind]["agent"]} for --kind {args.kind}')
+    asker(args)
     with state(args.state) as fixes:
         mine = [fix for fix in fixes.values() if fix['ticket'] == ticket]
         refused = refusal(mine, args.kind)
@@ -527,7 +540,7 @@ def command_submit(args, config):
         session = Agents(config).start(agent, f'oncall-{args.kind}: {args.repository} for ticket {ticket[:8]}', task, f'oncall-{args.kind}-{fix_tag}',
                                        workspace=workspace)
         fixes[key] = {'ticket': ticket, 'kind': args.kind, 'tag': fix_tag, 'repository': args.repository, 'brief': brief,
-                      'fix_session': session, 'stage': 'fixing', 'created': stamp(), 'since': stamp()}
+                      'fix_session': session, 'stage': 'fixing', 'created': stamp(), 'since': stamp(), **({'by': args.by} if args.by else {})}
     print(json.dumps({'submitted': True, 'kind': args.kind, 'stage': 'fixing', 'session': session,
                       'note': 'the pull request and its review are replied into this alert topic; do not wait for them'}, ensure_ascii=False))
     return 0
@@ -537,6 +550,7 @@ def command_merge(args, config):
     ticket = args.ticket or os.environ.get('DSH_SUPERAGENT_TICKET', '')
     if not TICKET.match(ticket):
         raise Refused('--ticket (or DSH_SUPERAGENT_TICKET) must be a ticket id')
+    asker(args)
     with state(args.state) as fixes:
         ready = [fix for fix in fixes.values() if fix['ticket'] == ticket and fix['stage'] == 'ready' and fix.get('pr_number')
                  and (args.pr is None or fix['pr_number'] == args.pr)]
@@ -558,6 +572,8 @@ def command_merge(args, config):
             'do not retry with another key or head; report its error code and reason in one short answer.'),
             f'oncall-merge-{tag(fix)}-{fix["pr_number"]}-{fix.get("merge_attempts", 0) + 1}')
         fix.update(stage='merging', since=stamp(), head_sha=head, merge_attempts=fix.get('merge_attempts', 0) + 1)
+        if args.by:
+            fix['by'] = args.by
     print(json.dumps({'merging': fix['pr_url'], 'note': 'the result is replied into this alert topic; do not wait for it'}, ensure_ascii=False))
     return 0
 
@@ -566,6 +582,7 @@ def command_release(args, config):
     ticket = args.ticket or os.environ.get('DSH_SUPERAGENT_TICKET', '')
     if not TICKET.match(ticket):
         raise Refused('--ticket (or DSH_SUPERAGENT_TICKET) must be a ticket id')
+    asker(args)
     with state(args.state) as fixes:
         mine = [fix for fix in fixes.values() if fix['ticket'] == ticket and fix.get('pr_number') and (args.pr is None or fix['pr_number'] == args.pr)]
         waiting = [fix for fix in mine if fix['stage'] in ('ready', 'merged')]
@@ -589,6 +606,8 @@ def command_release(args, config):
             return 2
         fix.setdefault('head_sha', (fix.get('verdicts') or [{}])[-1].get('head_sha'))
         args.fix_agent = config['FIX_AGENT_ID']
+        if args.by:
+            fix['by'] = args.by
         start_release(args, Agents(config), fix, release)
     print(json.dumps({'releasing': fix['pr_url'], 'note': 'the result is replied into this alert topic; do not wait for it'}, ensure_ascii=False))
     return 0
@@ -633,6 +652,7 @@ def main():
     submit.add_argument('--repository', required=True)
     submit.add_argument('--brief', required=True, help='a file with the request, the evidence and the change or design wanted, or - for stdin')
     submit.add_argument('--ticket', default='')
+    submit.add_argument('--by', default='', help='open_id of the person who asked; replies mention them')
     tick = sub.add_parser('tick', help='advance every fix (cron)')
     tick.add_argument('--url', default=os.environ.get('DSH_SUPERAGENT_URL') or 'http://127.0.0.1:3082')
     tick.add_argument('--lark-cli', default='lark-bot')
@@ -641,9 +661,11 @@ def main():
     merge = sub.add_parser('merge', help='have the Agent that opened it merge the ticket\'s reviewed pull request')
     merge.add_argument('--pr', type=int)
     merge.add_argument('--ticket', default='')
+    merge.add_argument('--by', default='', help='open_id of the person who asked; replies mention them')
     release = sub.add_parser('release', help='have the fix Agent release the ticket\'s merged pull request')
     release.add_argument('--pr', type=int)
     release.add_argument('--ticket', default='')
+    release.add_argument('--by', default='', help='open_id of the person who asked; replies mention them')
     sub.add_parser('status', help='list the fixes')
     args = parser.parse_args()
     try:
