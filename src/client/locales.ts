@@ -755,6 +755,7 @@ const TEXT = {
   'userError.assignmentEnded': ['这个派工已结束，工单已由较新的派工接手。', USER_ERRORS.assignmentEnded[1]],
   'userError.evalFinished': ['评估 {eval} 已结束，或已被之后的评估取代；请对这个触发当前的评估做决定。', USER_ERRORS.evalFinished[1]],
   'userError.notAdmissible': ['这个触发未通过准入：{reason}', USER_ERRORS.notAdmissible[1]],
+  'userError.silentIgnore': ['忽略明确请求时要带 reply（一句话说明为什么不做、怎样才能推进），或给 quiet：duplicate、answered 或 discussion。', USER_ERRORS.silentIgnore[1]],
   'userError.notExplicit': ['通过 orchestrator_route 接单只用于名单内发送者的明确请求；主动接单的候选请用 orchestrator_eval 和 orchestrator_eval_decide 研判。', USER_ERRORS.notExplicit[1]],
   'userError.ticketStopped': ['有人停止了这个工单；新工作需要通过 orchestrator_route 接单。', USER_ERRORS.ticketStopped[1]],
   'userError.mandateRevoked': ['按当前策略，这个工单的授权已失效；新工作需要通过 orchestrator_route 接单。', USER_ERRORS.mandateRevoked[1]],

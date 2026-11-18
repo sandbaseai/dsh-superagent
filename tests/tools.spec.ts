@@ -119,7 +119,7 @@ it('answers every routing tool in one shape: the decision it recorded, why, and 
   expect(await run('orchestrator_ticket_retry', { ticket_id: ticket.id })).toEqual({ reason: 'Started a new assignment', ticket: card })
   const chatter = feishu('4', '@bot 谢谢')
   h.runtime.receive(chatter); await h.runtime.idle()
-  expect(await route({ kind: 'ignore', trigger_id: chatter.id, reason: 'thanks' })).toEqual({ trigger_id: chatter.id, kind: 'ignore', decision: 'ignore',
+  expect(await route({ kind: 'ignore', trigger_id: chatter.id, reason: 'thanks', quiet: 'discussion' })).toEqual({ trigger_id: chatter.id, kind: 'ignore', decision: 'ignore',
     reason: 'thanks' })
   // A stop needs the person's stop message, which the gate judges; the ticket keeps the reason given.
   await expect(run('orchestrator_route', { decisions: [{ kind: 'stop', ticket_id: ticket.id, reason: 'Not needed after all' }] })).rejects.toThrow()
@@ -145,7 +145,7 @@ it('routes several triggers in one call, in order, and answers a refused or fail
     return attach(ticketId, triggerId, note)
   })
   const { results } = await h.runTool(h.runtime.masterId, 'orchestrator_route', { decisions: [
-    { kind: 'ignore', trigger_id: thanks.id, reason: 'Thanks only.' },
+    { kind: 'ignore', trigger_id: thanks.id, reason: 'Thanks only.', quiet: 'discussion' },
     // A stop without its ticket is refused, alone.
     { kind: 'stop', trigger_id: request.id },
     { kind: 'accept', trigger_id: request.id, title: 'Other', worktree_name: 'fix-other', acknowledgement: '收到。' },
@@ -175,7 +175,7 @@ it('refuses alone an item that lacks a field its kind needs or breaks a field\'s
     { ...accept, trigger_id: c, worktree_name: 'fix-c', note: words(NOTE_WORDS + 1) },
     { ...accept, trigger_id: d, worktree_name: 'fix-d', title: '' },
     // Fields of another kind, null or not, are left unread.
-    { kind: 'ignore', trigger_id: e, reason: 'chat', ticket_id: null, title: null, note: null },
+    { kind: 'ignore', trigger_id: e, reason: 'chat', quiet: 'discussion', ticket_id: null, title: null, note: null },
   ] }) as { results: Record<string, unknown>[] }
   expect(results).toEqual([
     { trigger_id: a, kind: 'accept', refused: 'accept needs worktree_name' },
@@ -197,7 +197,7 @@ it('decides a candidate\'s batch with its card\'s trigger: a second accept keeps
   const { results } = await h.runTool(h.runtime.masterId, 'orchestrator_route', { decisions: [
     { ...accept, trigger_id: first.id, title: 'Retitle' },
     { ...accept, trigger_id: second.id, title: 'Another title' },
-    { kind: 'ignore', trigger_id: second.id, reason: 'chat' },
+    { kind: 'ignore', trigger_id: second.id, reason: 'chat', quiet: 'discussion' },
   ] }) as { results: { ticket?: { ticket_id: string } }[] }
   const ticketId = results[0]!.ticket!.ticket_id
   expect(results).toEqual([
@@ -235,8 +235,8 @@ it('ignores a proactive candidate from its card beside other decisions, marked s
   for (const trigger of [chat, thanks, proposal]) h.runtime.receive(trigger)
   await h.runtime.pump(); await h.runtime.idle()
   const { results } = await h.runTool(h.runtime.masterId, 'orchestrator_route', { decisions: [
-    { kind: 'ignore', trigger_id: chat.id, reason: 'Lunch chat.' },
-    { kind: 'ignore', trigger_id: thanks.id, reason: 'Thanks only.' },
+    { kind: 'ignore', trigger_id: chat.id, reason: 'Lunch chat.', quiet: 'discussion' },
+    { kind: 'ignore', trigger_id: thanks.id, reason: 'Thanks only.', quiet: 'discussion' },
     { kind: 'accept', trigger_id: proposal.id, title: 'Shorter title', worktree_name: 'short-title', acknowledgement: '收到。' },
   ] }) as { results: Record<string, unknown>[] }
   expect(results).toEqual([
@@ -430,7 +430,7 @@ it('tells the main Session of the settings, prompts, requeues and unsubscription
   await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
   const thanks = feishu('5', '@bot 谢谢')
   h.runtime.receive(thanks); await h.runtime.idle()
-  await h.route({ kind: 'ignore', trigger_id: thanks.id, reason: 'thanks' })
+  await h.route({ kind: 'ignore', trigger_id: thanks.id, reason: 'thanks', quiet: 'discussion' })
   expect(await h.runTool(h.runtime.masterId, 'orchestrator_trigger_requeue', { trigger_id: thanks.id })).toEqual({ queued: true })
   expect(await h.runTool(h.runtime.masterId, 'orchestrator_thread_unsubscribe', { thread: `feishu:${CHAT}:om_1` })).toEqual({ removed: true, thread: `feishu:${CHAT}:om_1` })
   await h.runtime.idle()

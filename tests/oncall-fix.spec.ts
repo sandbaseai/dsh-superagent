@@ -19,6 +19,8 @@ let sessions: Map<string, Session>, keys: string[]
 const answer = (text: string): Item => ({ type: 'message', role: 'assistant', id: `msg-${Math.random()}`, content: [{ type: 'text', text }] })
 const opened = (number: number): Item => ({ type: 'mcp_call', name: 'github_open_pull_request', status: 'completed', id: `call-${number}`,
   output: [{ type: 'text', text: JSON.stringify({ pr_url: `https://github.com/acme/site/pull/${number}`, pr_number: number, head_sha: 'f'.repeat(40) }) }] })
+const mergedBy = (number: number, merged = true): Item => ({ type: 'mcp_call', name: 'github_merge_pull_request', status: 'completed', id: `merge-${number}`,
+  output: [{ type: 'text', text: JSON.stringify(merged ? { merged: true, pr_number: number, merge_commit_sha: 'a'.repeat(40) } : { error: { code: 'conflict', reason: 'head_changed' } }) }] })
 const review = (verdict: string, summary: string) => answer(`Done.\n${JSON.stringify({ verdict, risk: 'low', commented: true, head_sha: 'f'.repeat(40), blockers: [], summary })}`)
 /** Finish a Session's turn with `items`, newest first as the API lists them. */
 function finish(id: string, ...items: Item[]) { const session = sessions.get(id)!; session.items = [...items, ...session.items]; session.status = 'idle' }
@@ -59,7 +61,7 @@ beforeEach(async () => {
   panelUrl = `http://127.0.0.1:${(panel.address() as AddressInfo).port}`
   // The script requires https; the test serves plain HTTP and rewrites the configured https address in the request.
   writeFileSync(join(root, 'fix.env'), ['SANDBASE_AGENTS_URL=https://agents.example/v1', `SANDBASE_API_KEY=${SANDBASE_KEY}`, 'FIX_AGENT_ID=agt_fix',
-    'REVIEW_AGENT_ID=agt_review', '\u200bMODEL_BASE_URL=\u200bhttps://gateway.example', `MODEL_API_KEY=${MODEL_KEY}`].join('\n') + '\n', { mode: 0o600 })
+    'REVIEW_AGENT_ID=agt_review', 'DEV_AGENT_ID=agt_dev', '\u200bMODEL_BASE_URL=\u200bhttps://gateway.example', `MODEL_API_KEY=${MODEL_KEY}`].join('\n') + '\n', { mode: 0o600 })
   writeFileSync(join(root, 'lark'), `#!/bin/sh\nfor a; do [ "$prev" = --markdown ] && printf '%s\\n---\\n' "$a" >> ${JSON.stringify(join(root, 'replies.md'))}; prev=$a; done\n`, { mode: 0o755 })
   writeFileSync(join(root, 'brief.md'), 'Problem: /free-tools/photo-restoration returns 404. Evidence: CLB 08:36. Change: add a redirect.')
 })
@@ -151,4 +153,75 @@ it('refuses a bad ticket, repository or brief, and a config others can read', as
   const { chmodSync } = await import('node:fs'); chmodSync(join(root, 'fix.env'), 0o644)
   expect(await fix('submit', '--repository', 'acme/site', '--brief', join(root, 'brief.md'))).toMatchObject({ code: 2, stderr: expect.stringContaining('chmod 600') })
   expect(sessions.size).toBe(0)
+})
+
+it('starts a design with the dev Agent after a fix opened no pull request, one request at a time, and reviews it as a design', async () => {
+  await fix('submit', '--repository', 'acme/site', '--brief', join(root, 'brief.md'))
+  writeFileSync(join(root, 'design.md'), 'Request: 出个具体的设计方案吧，把方案写到 PR 里. Evidence: the daily summary rescans predictions every 10 min.')
+  const busy = await fix('submit', '--kind', 'design', '--repository', 'acme/admin', '--brief', join(root, 'design.md'))
+  expect(busy).toMatchObject({ code: 2, stdout: expect.stringContaining('in progress') })
+  finish('ses_1', answer('The change needs a design decision, so I opened no pull request.'))
+  await tick()
+  expect(stage().stage).toBe('no_pr')
+
+  const design = await fix('submit', '--kind', 'design', '--repository', 'acme/admin', '--brief', join(root, 'design.md'))
+  expect(design.code, design.stderr).toBe(0)
+  const [[id, session]] = byAgent('agt_dev') as [[string, Session]]
+  expect(session.input).toContain('Task: write a design proposal as a pull request')
+  expect(session.input).toContain('出个具体的设计方案吧')
+  expect(keys).toContain(`oncall-design-${TICKET.slice(0, 16)}-2`)
+  finish(id, answer('Opened #12.'), opened(12))
+  await tick()
+  const entry = JSON.parse(readFileSync(join(root, 'state.json'), 'utf8'))[`${TICKET}:2`]
+  expect(entry).toMatchObject({ kind: 'design', stage: 'review', pr_url: 'https://github.com/acme/site/pull/12' })
+  expect(byAgent('agt_review')[0]![1].input).toContain('Kind: design')
+  expect(keys).toContain(`oncall-review-${TICKET.slice(0, 16)}-2-r1`)
+  expect(replies().at(-1)).toMatch(/^\*\*已提交设计方案 PR\*\*：https:\/\/github\.com\/acme\/site\/pull\/12/)
+  finish('ses_3', review('approve', '方案清楚')); await tick()
+  expect(replies().at(-1)).toContain('**审阅通过，等人合并**')
+  // A design that opened a pull request is not asked for again, and a ticket gets one fix.
+  expect(await fix('submit', '--kind', 'design', '--repository', 'acme/admin', '--brief', join(root, 'design.md')))
+    .toMatchObject({ code: 2, stdout: expect.stringContaining('already has a design pull request') })
+  expect(await fix('submit', '--repository', 'acme/site', '--brief', join(root, 'brief.md')))
+    .toMatchObject({ code: 2, stdout: expect.stringContaining('already has a fix') })
+  expect(sessions.size).toBe(3)
+})
+
+it('refuses a design without a dev Agent configured, and a fourth request on a ticket', async () => {
+  const env = readFileSync(join(root, 'fix.env'), 'utf8')
+  writeFileSync(join(root, 'fix.env'), env.replace('DEV_AGENT_ID=agt_dev\n', ''), { mode: 0o600 })
+  expect(await fix('submit', '--kind', 'design', '--repository', 'acme/admin', '--brief', join(root, 'brief.md')))
+    .toMatchObject({ code: 2, stderr: expect.stringContaining('lacks DEV_AGENT_ID') })
+  writeFileSync(join(root, 'fix.env'), env, { mode: 0o600 })
+  const ended = (n: number) => ({ ticket: TICKET, kind: 'design', repository: 'acme/admin', brief: 'b', stage: 'no_pr', created: '2026-11-18T00:00:00+00:00',
+    since: '2026-11-18T00:00:00+00:00', tag: `t${n}` })
+  writeFileSync(join(root, 'state.json'), JSON.stringify({ [TICKET]: ended(1), [`${TICKET}:2`]: ended(2), [`${TICKET}:3`]: ended(3) }))
+  expect(await fix('submit', '--kind', 'design', '--repository', 'acme/admin', '--brief', join(root, 'brief.md')))
+    .toMatchObject({ code: 2, stdout: expect.stringContaining('already had 3 requests') })
+  expect(sessions.size).toBe(0)
+})
+
+it('merges a reviewed pull request through the Session that opened it, only when a person asks, and only the reviewed head', async () => {
+  await fix('submit', '--repository', 'acme/site', '--brief', join(root, 'brief.md'))
+  expect(await fix('merge')).toMatchObject({ code: 2, stdout: expect.stringContaining('no pull request of this ticket passed review') })
+  finish('ses_1', answer('Opened #7.'), opened(7)); await tick()
+  finish('ses_2', review('approve', '通过')); await tick()
+  expect(replies().at(-1)).toContain('回复「合并」，由 Agent 合并')
+
+  // The head changed since the review: the Agent does not merge, and the fix waits again.
+  expect(await fix('merge')).toMatchObject({ code: 0 })
+  expect(stage()).toMatchObject({ stage: 'merging', head_sha: 'f'.repeat(40) })
+  expect(sessions.get('ses_1')!.events.at(-1)).toContain(`expected_head_sha ${'f'.repeat(40)}`)
+  expect(await fix('merge')).toMatchObject({ code: 2 })
+  finish('ses_1', mergedBy(7, false), answer('conflict head_changed: the branch moved after review.'))
+  await tick()
+  expect(stage().stage).toBe('ready')
+  expect(replies().at(-1)).toContain('**没有合并**：conflict head_changed')
+
+  expect(await fix('merge', '--pr', '7')).toMatchObject({ code: 0 })
+  expect(keys.filter(key => key.startsWith('oncall-merge-'))).toEqual([`oncall-merge-${TICKET.slice(0, 16)}-7-1`, `oncall-merge-${TICKET.slice(0, 16)}-7-2`])
+  finish('ses_1', answer('Merged #7.'), mergedBy(7)); await tick()
+  expect(stage()).toMatchObject({ stage: 'merged', merge_sha: 'a'.repeat(40) })
+  expect(replies().at(-1)).toBe('**已合并**：https://github.com/acme/site/pull/7')
+  expect(await fix('merge')).toMatchObject({ code: 2 })
 })

@@ -165,7 +165,7 @@ async function drive(host: Host) {
   await runtime.receive(request); await runtime.receive(thanks); await runtime.receive(chat)
   const routed = await run(master, 'orchestrator_route', { decisions: [
     { kind: 'accept', trigger_id: request.id, title: '修复回归', worktree_name: 'fix-regression', acknowledgement: '收到，修复回归。' },
-    { kind: 'ignore', trigger_id: thanks.id, reason: 'Thanks only.' }, { kind: 'ignore', trigger_id: chat.id, reason: 'Lunch chat.' }] }) as
+    { kind: 'ignore', trigger_id: thanks.id, reason: 'Thanks only.', quiet: 'discussion' }, { kind: 'ignore', trigger_id: chat.id, reason: 'Lunch chat.', quiet: 'discussion' }] }) as
     { results: { decision?: string; reason?: string; ticket?: { ticket_id: string } }[] }
   expect(routed.results.map(result => result.decision)).toEqual(['accept', 'ignore', 'ignore'])
   expect(routed.results[2]!.reason).toMatch(/^Ignored from its card/)

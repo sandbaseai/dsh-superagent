@@ -41,7 +41,7 @@ it('evaluates a message that arrives on a thread while an earlier candidate\'s c
   gate.resolve(); await h.runtime.idle()
   const threadB = `feishu:${CHAT}:om_2`
   expect(h.runtime.store.threads.get(threadB)).toMatchObject({ evaluating: { triggerIds: [b1.id] }, pending: [b2.id] })
-  await h.route({ kind: 'ignore', trigger_id: b1.id, reason: 'duplicate' })
+  await h.route({ kind: 'ignore', trigger_id: b1.id, reason: 'duplicate', quiet: 'duplicate' })
   await h.runtime.idle()
   expect(h.runtime.store.threads.get(threadB)).toMatchObject({ evaluating: { triggerIds: [b2.id] }, pending: [] })
   // A slow link lookup holds only its own candidate's card.
