@@ -201,6 +201,9 @@ function RecentRow({ item }: { item: Ended }) {
         <span>{t(`outcome.${item.outcome}`)}</span>
         {item.source && <span>{valueLabel(t, 'source', item.source)}</span>}
         <span>{t('liveTookTotal', { time: duration(t, item.took) })}</span>
+        {'cost' in item && item.cost && <span>{t('liveTools', { count: item.cost.tools })}{item.cost.errors > 0
+          && ` · ${t('liveToolErrors', { count: item.cost.errors })}`}</span>}
+        {'cost' in item && item.cost && item.cost.tokens > 0 && <span>{t('liveTokens', { count: tokens(item.cost.tokens) })}</span>}
         <When at={item.endedAt} />
       </div>
       {item.report?.summary && <div className="dt-row-quote">{item.report.summary}</div>}

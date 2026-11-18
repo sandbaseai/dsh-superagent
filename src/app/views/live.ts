@@ -59,14 +59,19 @@ export function dayStats(tickets: readonly Ticket[], now = Date.now()) {
 
 /** How many ended Tickets the view lists, newest end first. */
 const RECENT = 10
-/** The latest ended Tickets: how each ended, how long from its Trigger to its end, and what its worker last said. */
-export function recentEnded(view: Snapshot, tickets: readonly Ticket[]) {
-  return tickets.filter(ticket => ticket.ended).sort((a, b) => b.ended!.at.localeCompare(a.ended!.at)).slice(0, RECENT).map(ticket => {
+/** The ended Tickets the view lists, newest end first. */
+export const lastEnded = (tickets: readonly Ticket[]) =>
+  tickets.filter(ticket => ticket.ended).sort((a, b) => b.ended!.at.localeCompare(a.ended!.at)).slice(0, RECENT)
+/** How each listed ended Ticket ended, how long from its Trigger to its end, what its worker last said and, while its Session is loaded, what it spent. */
+export function recentEnded(view: Snapshot, ended: readonly Ticket[], done: ReadonlyMap<string, Activity>) {
+  return ended.map(ticket => {
+    const cost = done.get(ticket.id)
     const trigger = view.store.triggers.get(ticket.origin.triggerId)
     const report = latestReport(ticket)
     return { id: ticket.id, title: ticket.title, source: ticket.channels[0]?.source, outcome: ticket.ended!.outcome, by: ticket.ended!.by,
       endedAt: ticket.ended!.at, took: Date.parse(ticket.ended!.at) - Date.parse(trigger?.at ?? ticket.createdAt),
-      report: report && { state: report.state, summary: preview(report.summary.split('\n')[0] ?? '') } }
+      report: report && { state: report.state, summary: preview(report.summary.split('\n')[0] ?? '') },
+      ...cost ? { cost: { tokens: cost.tokens, tools: cost.tools, errors: cost.errors } } : {} }
   })
 }
 
@@ -85,7 +90,8 @@ export function liveView(host: ViewHost, overview: OverviewView, workers: readon
   }
   const rank = (item: ReturnType<typeof row>) => item.slot ? ORDER.slot : ORDER[item.stage]
   const sorted = store.tickets.open().sort(newestFirst).map(row).sort((a, b) => rank(a) - rank(b)).slice(0, SHOWN)
-  const done = activity(sorted.filter(item => item.sessionId).map(item => item.id))
+  const ended = lastEnded(store.tickets.list())
+  const done = activity([...sorted.filter(item => item.sessionId).map(item => item.id), ...ended.map(ticket => ticket.id)])
   const open = sorted.map(item => { const value = done.get(item.id); return value ? { ...item, activity: value } : item })
   const total = store.tickets.open().length
   const evaluating = store.threads.active().filter(thread => thread.evaluating).map(thread => {
@@ -107,7 +113,7 @@ export function liveView(host: ViewHost, overview: OverviewView, workers: readon
     tickets: open, total,
     trace: latest ? trace(view, latest) : undefined,
     day: dayStats(store.tickets.list()),
-    recent: recentEnded(view, store.tickets.list()),
+    recent: recentEnded(view, ended, done),
   }
 }
 export type LiveView = ReturnType<typeof liveView>
