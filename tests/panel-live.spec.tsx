@@ -2,8 +2,9 @@
 // The live view.
 import { expect, it } from 'vitest'
 import { en, zh } from '../src/client/locales.ts'
-import { usePanel, mount, all, tab, click, text, at } from './fixtures/panel.tsx'
+import { usePanel, mount, remount, all, tab, click, text, at } from './fixtures/panel.tsx'
 import { server } from './fixtures/panel-server.ts'
+import type { Activity } from '../src/executor/activity.ts'
 
 usePanel()
 it('joins the Sources, the Router and the worker slots, each lit by what it does, and says the state in one sentence', async () => {
@@ -21,6 +22,20 @@ it('joins the Sources, the Router and the worker slots, each lit by what it does
     .toBe('Router 正在评估 1 个话题，2 个 Worker 在干活，1 个工单排队等工位，1 个工单等人处理。')
   await click('跑压测')
   expect(server.requests.some(request => request.path === 'tickets/t2')).toBe(true)
+})
+
+it('shows what each worker did last, with its subagents, tool calls and tokens, and marks a turn quiet for five minutes', async () => {
+  at({ page: 'live' })
+  await mount()
+  expect(document.querySelector('.dt-live-activity')?.textContent)
+    .toBe('bashdsh-oncall cls --topic api20 秒前有动作1 个 Subagent 在跑14 次工具调用 · 1 次出错182k tokens')
+  expect(document.querySelector('.dt-live-slot[data-quiet]')).toBeNull()
+  const [first, ...rest] = server.live.tickets
+  const activity = { ...(first as unknown as { activity: Activity }).activity, lastAt: '2026-09-22T00:05:00Z' }
+  server.live = { ...server.live, tickets: [{ ...first!, activity }, ...rest] }
+  await remount()
+  expect(document.querySelector('.dt-live-slot[data-quiet="true"]')).not.toBeNull()
+  expect(text()).toContain('7 分钟没有动作')
 })
 
 it('opens the Router\'s main Session and each worker\'s Session from its card', async () => {

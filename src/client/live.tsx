@@ -10,6 +10,8 @@ import { Hint, LoadState, Section, SessionButton, When } from './widgets.tsx'
 const POLL_MS = 2000
 /** The span a worker's bar fills: the background limit after a turn, 30 minutes. */
 const BAR_MS = 30 * 60_000
+/** A turn with no tool call, result or model answer for this long looks stuck. */
+export const QUIET_MS = 5 * 60_000
 type Row = LiveView['tickets'][number]
 type Trace = NonNullable<LiveView['trace']>
 export type WorkState = 'turn' | 'background' | 'person' | 'queued' | 'idle'
@@ -19,6 +21,8 @@ export const workState = (row: Row): WorkState => row.slot ? row.turn ? 'turn' :
 const DOT = { turn: 'ongoing', background: 'warning', person: 'error', queued: 'idle', idle: 'done' } as const
 
 const ms = (from: string | undefined, to: string | undefined) => from && to ? Math.max(0, Date.parse(to) - Date.parse(from)) : 0
+export const tokens = (value: number) => value >= 1_000_000 ? `${(value / 1_000_000).toFixed(1)}M`
+  : value >= 1000 ? `${Math.round(value / 1000)}k` : String(value)
 export function duration(t: T, value: number): string {
   const seconds = Math.round(value / 1000)
   if (seconds < 60) return t('liveSeconds', { n: seconds })
@@ -44,7 +48,9 @@ function Slot({ row, now }: { row: Row | undefined; now: string }) {
   if (!row) return <li className="dt-live-slot" data-state="free"><span className="dt-live-slot-dot" />
     <span className="dt-live-slot-title">{t('liveSlotFree')}</span></li>
   const state = workState(row), elapsed = ms(row.startedAt, now)
-  return <li className="dt-live-slot" data-state={state}>
+  const activity = 'activity' in row ? row.activity : undefined
+  const quiet = row.turn && activity?.lastAt ? ms(activity.lastAt, now) : 0
+  return <li className="dt-live-slot" data-state={state} data-quiet={quiet >= QUIET_MS || undefined}>
     <span className="dt-live-slot-dot" />
     <button type="button" className="dt-live-slot-title dt-textlink" onClick={() => navigate({ page: 'execution', id: row.id })}>
       {readableMarkers(t, row.title)}</button>
@@ -52,6 +58,16 @@ function Slot({ row, now }: { row: Row | undefined; now: string }) {
     <span className="dt-live-slot-state">{t(`live.${state}`)}{row.jobs > 0 && ` · ${t('liveJobs', { count: row.jobs })}`}
       {row.startedAt && ` · ${duration(t, elapsed)}`}</span>
     {row.sessionId ? <SessionButton sessionId={row.sessionId} label={t('liveOpenWorker')} /> : <span />}
+    {activity && <span className="dt-live-activity">
+      {activity.lastTool && <span className="dt-live-tool" title={activity.lastTool.detail}>
+        <code>{activity.lastTool.name}</code>{activity.lastTool.detail && <span className="dt-live-tool-detail">{activity.lastTool.detail}</span>}
+      </span>}
+      {quiet >= QUIET_MS ? <span className="dt-live-quiet">{t('liveQuiet', { time: duration(t, quiet) })}</span>
+        : activity.lastAt && <span>{t('liveAgo', { time: duration(t, ms(activity.lastAt, now)) })}</span>}
+      {activity.subagents > 0 && <span>{t('liveSubagents', { count: activity.subagents })}</span>}
+      <span>{t('liveTools', { count: activity.tools })}{activity.errors > 0 && ` · ${t('liveToolErrors', { count: activity.errors })}`}</span>
+      {activity.tokens > 0 && <span>{t('liveTokens', { count: tokens(activity.tokens) })}</span>}
+    </span>}
     <span className="dt-live-bar" title={t('liveBarHint')}><span style={{ width: `${Math.min(100, elapsed / BAR_MS * 100)}%` }} /></span>
   </li>
 }

@@ -17,6 +17,7 @@ import type { Sessions } from '../app/sessions.ts'
 import { WorktreeNameSchema } from '../app/assessment.ts'
 import { resultRelay } from '../app/notices.ts'
 import type { HealthEntry } from '../infra/health.ts'
+import { Activities, type Activity, type ActivityEvent } from './activity.ts'
 import { cancelled, collectJob, killJobs, runningJobs, stopBackground, stopSubagents, until, untilQuiet } from './background.ts'
 
 const now = (): string => new Date().toISOString()
@@ -225,6 +226,8 @@ export class DshExecutor implements Executor {
   private readonly personal = new Map<string, string>()
   /** The timers of workers that go on after a passing failure, which dispose clears. */
   private readonly timers = new Set<ReturnType<typeof setTimeout>>()
+  /** What each open ticket's worker and its subagents did lately, for the live view. */
+  private readonly activities = new Activities()
   /** Registers the `launch` and `delivery` effect handlers; both are held (concurrency limit 0) while processing is paused. */
   constructor(private readonly host: ExecutorHost) {
     this.slots = new WorkerSlots(() => host.store.tickets.open().filter(ticket => this.running(ticket)).map(ticket => ticket.id),
@@ -404,6 +407,29 @@ export class DshExecutor implements Executor {
   /** Number of open tickets whose worker holds a worker slot: its turn runs, or its shell jobs or subagents still run after its turn ended. */
   activeCount(): number { return this.host.store.tickets.open().filter(ticket => this.running(ticket)).length }
   /** The workers that hold a slot: whether their turn runs, or only their background work does, and how many shell jobs they own. */
+  /**
+   * What each open ticket's worker and its subagents did lately: each loaded worker's Session is read once (see
+   * `Activities.seed`), then events as they happen.
+   */
+  activity(ticketIds: readonly string[]): Map<string, Activity> {
+    this.activities.keep(new Set(this.host.store.tickets.open().map(ticket => ticket.id)))
+    const found = new Map<string, Activity>()
+    for (const id of ticketIds) {
+      const agent = this.host.context.agents.get(workerSessionId(id) as SessionId)
+      if (agent) this.activities.seed(id, () => agent.session.snapshotEvents() as readonly ActivityEvent[])
+      const value = this.activities.get(id)
+      if (value) found.set(id, value)
+    }
+    return found
+  }
+  /** The ticket a worker Session, or a subagent at any depth below one, works for. */
+  private ticketUnder(sessionId: string, parent: string | undefined): string | undefined {
+    let id: string | undefined = sessionId, up = parent
+    for (let depth = 0; id !== undefined && ticketOfSession(id) === undefined && depth < 8; depth++) {
+      id = up; up = id === undefined ? undefined : this.host.context.agents.get(id as SessionId)?.session?.header?.parentSession
+    }
+    return id === undefined ? undefined : ticketOfSession(id)
+  }
   workers(): WorkerActivity[] {
     return this.host.store.tickets.open().filter(ticket => this.running(ticket)).map(ticket => {
       const sessionId = workerSessionId(ticket.id)
@@ -486,6 +512,11 @@ export class DshExecutor implements Executor {
   install(): void {
     const ctx = this.host.context
     this.disposers.push(ctx.on('agent/status', ({ agent, status }) => {
+      if (ticketOfSession(agent.id) === undefined) {
+        const ticketId = this.ticketUnder(agent.id, agent.session?.header?.parentSession)
+        if (ticketId !== undefined) this.activities.subagent(ticketId, agent.id, status === 'running')
+        return
+      }
       // A turn that starts ends the look at its worker's background work; the turn's own idle looks afresh.
       if (status === 'running') { this.settling.get(ticketOfSession(agent.id) ?? '')?.abort(); return }
       // The turn a stop of the worker's subagents woke and cancelled is no turn of the worker's.
@@ -502,6 +533,8 @@ export class DshExecutor implements Executor {
     // The Inputs a message of dsh-superagent's carries, which its worker reads once the Session took the message into its
     // history: a step that claimed it may be cancelled or fail before, which drops it.
     this.disposers.push(ctx.on('session/event', (session, event) => {
+      const working = this.ticketUnder(session.id, session.header?.parentSession)
+      if (working !== undefined && this.host.store.tickets.get(working)) this.activities.record(working, event as ActivityEvent)
       const ticketId = ticketOfSession(session.id)
       if (event.type !== 'user/message' || ticketId === undefined || event.data.source.kind !== 'dsh-superagent' || this.host.closing()) return
       const message = event.data
