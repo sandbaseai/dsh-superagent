@@ -176,7 +176,7 @@ it('counts the fixes oncall-fix started in the feedback window and lists those w
     d: { created: at(100), stage: 'ready', repository: 'acme/old', pr_url: 'https://github.com/acme/old/pull/1' } }))
   expect((await digest(await gateway(answer))).code).toBe(0)
   const sent = readFileSync(join(root, 'sent.md'), 'utf8')
-  expect(sent).toContain('**自动修复**（过去 48 小时发起 3 个）：进行中 1 · 等人合并 1 · 没开 PR 0 · 需要人看 1')
+  expect(sent).toContain('**自动修复**（过去 48 小时发起 3 个）：进行中 1 · 等人合并 1 · 已发布 0 · 没开 PR 0 · 需要人看 1')
   expect(sent).toContain('- 等人合并：https://github.com/acme/site/pull/7')
   expect(sent).toContain('- 需要人看：https://github.com/acme/site/pull/8')
   expect(sent).not.toContain('acme/old')

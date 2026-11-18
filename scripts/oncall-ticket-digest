@@ -187,9 +187,10 @@ def fix_markdown(path, hours, now):
         return []
     count = lambda *stages: sum(1 for fix in recent if fix.get('stage') in stages)
     pending = [f'- 等人合并：{fix["pr_url"]}' for fix in recent if fix.get('stage') == 'ready']
-    pending += [f'- 需要人看：{fix.get("pr_url") or fix["repository"]}' for fix in recent if fix.get('stage') in ('needs_human', 'failed')]
-    return [f'**自动修复**（过去 {hours} 小时发起 {len(recent)} 个）：进行中 {count("fixing", "review", "revising")} · '
-            f'等人合并 {count("ready")} · 没开 PR {count("no_pr")} · 需要人看 {count("needs_human", "failed")}', *pending, '']
+    pending += [f'- 需要人看：{fix.get("pr_url") or fix["repository"]}' for fix in recent if fix.get('stage') in ('needs_human', 'failed', 'release_failed')]
+    return [f'**自动修复**（过去 {hours} 小时发起 {len(recent)} 个）：进行中 {count("fixing", "review", "revising", "merging", "releasing")} · '
+            f'等人合并 {count("ready")} · 已发布 {count("released")} · 没开 PR {count("no_pr")} · '
+            f'需要人看 {count("needs_human", "failed", "release_failed")}', *pending, '']
 
 
 def api_key(credentials, ref):

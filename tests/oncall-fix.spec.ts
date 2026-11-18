@@ -12,7 +12,7 @@ const TICKET = 'abcdef0123456789abcdef0123456789'
 const MODEL_KEY = 'sk-model-secret-0001'
 const SANDBASE_KEY = 'sb-agents-secret-0001'
 type Item = Record<string, unknown>
-type Session = { agent: string; input: string; status: string; items: Item[]; events: string[]; provider: Record<string, string> }
+type Session = { agent: string; input: string; status: string; items: Item[]; events: string[]; provider: Record<string, string>; workspace?: Record<string, string> }
 let root: string, agents: Server, panel: Server, agentsUrl: string, panelUrl: string
 let sessions: Map<string, Session>, keys: string[]
 
@@ -40,7 +40,7 @@ beforeEach(async () => {
       response.writeHead(200, { 'content-type': 'application/json' })
       if (request.method === 'POST' && path === '/agents/sessions') {
         const id = `ses_${sessions.size + 1}`
-        sessions.set(id, { agent: body.agent_id, input: body.input, status: 'in_progress', items: [], events: [], provider: body.model_provider })
+        sessions.set(id, { agent: body.agent_id, input: body.input, status: 'in_progress', items: [], events: [], provider: body.model_provider, workspace: body.github_workspace })
         response.end(JSON.stringify({ id })); return
       }
       const events = /^\/agents\/sessions\/(\w+)\/events$/.exec(path)
@@ -224,4 +224,84 @@ it('merges a reviewed pull request through the Session that opened it, only when
   expect(stage()).toMatchObject({ stage: 'merged', merge_sha: 'a'.repeat(40) })
   expect(replies().at(-1)).toBe('**已合并**：https://github.com/acme/site/pull/7')
   expect(await fix('merge')).toMatchObject({ code: 2 })
+})
+
+const called = (name: string, result: unknown): Item => ({ type: 'mcp_call', name, status: 'completed', id: `${name}-${Math.random()}`, output: [{ type: 'text', text: JSON.stringify(result) }] })
+const MAIN = 'c'.repeat(40)
+const tagged = (tag: string) => called('github_create_tag', { tag, sha: MAIN, url: `https://github.com/acme/site/releases/tag/${tag}` })
+const dispatched = (runId: string | null) => called('github_dispatch_workflow', { status: 'dispatched', run_id: runId, html_url: runId ? `https://github.com/acme/site/actions/runs/${runId}` : null, workflow_path: '.github/workflows/deploy.yaml', ref: 'main' })
+const runOf = (runId: string, conclusion: string, created = new Date(Date.now() + 1000).toISOString()) => called('github_read_workflow_runs', { run: { run_id: runId, event: 'workflow_dispatch', head_sha: MAIN, status: 'completed', conclusion, created_at: created, html_url: `https://github.com/acme/site/actions/runs/${runId}` } })
+const withReleases = () => writeFileSync(join(root, 'fix.env'), readFileSync(join(root, 'fix.env'), 'utf8') + 'REPOSITORIES=acme/site@4242,acme/admin@4343\nRELEASES=acme/site:.github/workflows/deploy.yaml\n', { mode: 0o600 })
+async function ready() {
+  await fix('submit', '--repository', 'acme/site', '--brief', join(root, 'brief.md'))
+  finish(stage().fix_session, answer('Opened #7.'), opened(7)); await tick()
+  finish(stage().review_session, review('approve', '通过')); await tick()
+  expect(stage().stage).toBe('ready')
+}
+
+it('releases a fix it merged: a new Session with the repository cloned tags main, dispatches the workflow and reports the run', async () => {
+  withReleases(); await ready()
+  expect(replies().at(-1)).toContain('合并后自动发布生产。')
+  await fix('merge')
+  finish('ses_1', answer('Merged #7.'), mergedBy(7)); await tick()
+  expect(stage()).toMatchObject({ stage: 'releasing', release_session: 'ses_3', release_attempts: 1 })
+  expect(replies().at(-1)).toBe('**已合并**：https://github.com/acme/site/pull/7\n开始发布生产，结果会回复在这里。')
+  const release = sessions.get('ses_3')!
+  expect(release).toMatchObject({ agent: 'agt_fix', workspace: { repository_id: '4242' } })
+  // Every Session of a listed repository works in its clone: the fix, its review and its release.
+  expect([...sessions.values()].map(session => session.workspace)).toEqual([{ repository_id: '4242' }, { repository_id: '4242' }, { repository_id: '4242' }])
+  expect(release.input).toMatch(/^oncall-fix release request: pull request #7/)
+  expect(release.input).toContain(`git merge-base --is-ancestor ${'a'.repeat(40)} origin/main`)
+  expect(release.input).toContain(`idempotency_key oncall-release-${TICKET.slice(0, 16)}-1-tag`)
+  expect(release.input).toContain('workflow_path .github/workflows/deploy.yaml')
+  await tick()
+  expect(stage().stage).toBe('releasing')
+  finish('ses_3', answer('Released v0.2.11: success.'), runOf('99', 'success'), dispatched('99'), tagged('v0.2.11')); await tick()
+  expect(stage()).toMatchObject({ stage: 'released', release_tag: 'v0.2.11', release_sha: MAIN })
+  expect(replies().at(-1)).toBe('**已发布 v0.2.11**：https://github.com/acme/site/pull/7\n部署：https://github.com/acme/site/actions/runs/99')
+  expect(await fix('release')).toMatchObject({ code: 2, stdout: expect.stringContaining('no pull request of this ticket waits to be released') })
+})
+
+it('releases a pull request a person merged on GitHub when asked, finds a release already shipped, and retries with the tag it made', async () => {
+  expect(await (async () => { await ready(); return fix('release') })()).toMatchObject({ code: 2, stdout: expect.stringContaining('is not released by oncall-fix') })
+  withReleases()
+  expect(await fix('release')).toMatchObject({ code: 0 })
+  expect(sessions.get('ses_3')!.input).toContain(`git merge-base --is-ancestor ${'f'.repeat(40)} origin/main`)
+  finish('ses_3', answer('Already in v0.2.10.\n{"already_released": "v0.2.10"}')); await tick()
+  expect(stage()).toMatchObject({ stage: 'released', release_tag: 'v0.2.10' })
+  expect(replies().at(-1)).toContain('**已上线**：合并已包含在 v0.2.10 中')
+
+  rmSync(join(root, 'state.json'))
+  await ready()
+  await fix('release')
+  finish(stage().release_session, answer('github_dispatch_workflow refused: app_permission_not_granted.'), tagged('v0.2.11')); await tick()
+  expect(stage()).toMatchObject({ stage: 'merged', release_tag: 'v0.2.11' })
+  expect(replies().at(-1)).toContain('<at user_id="all"></at> **没有发布**：github_dispatch_workflow refused')
+  expect(replies().at(-1)).toContain('已打 tag v0.2.11，重试会直接用它触发部署。')
+  expect(await fix('release')).toMatchObject({ code: 0 })
+  const second = stage().release_session
+  const retry = sessions.get(second)!.input
+  expect(retry).toContain(`already created tag v0.2.11 on ${MAIN}`)
+  expect(retry).not.toContain('github_create_tag')
+  // A run from before this release is not its run: the Session ended without one, so a person looks.
+  finish(second, answer('Gave up waiting.'), runOf('5', 'success', '2000-01-01T00:00:00Z'), dispatched(null)); await tick()
+  expect(stage()).toMatchObject({ stage: 'release_failed', reason: 'deploy run: 没有等到结果' })
+  expect(replies().at(-1)).toContain('**发布 v0.2.11 未成功**（没有等到结果）')
+
+  rmSync(join(root, 'state.json'))
+  await ready(); await fix('release')
+  finish(stage().release_session, answer('Deploy failed.'), runOf('6', 'failure'), dispatched('6'), tagged('v0.2.12')); await tick()
+  expect(stage()).toMatchObject({ stage: 'release_failed', run_url: 'https://github.com/acme/site/actions/runs/6' })
+  expect(replies().at(-1)).toContain('<at user_id="all"></at> **发布 v0.2.12 未成功**（failure）')
+})
+
+it('refuses a bad REPOSITORIES or RELEASES entry, and a release of a repository without a clone', async () => {
+  const base = readFileSync(join(root, 'fix.env'), 'utf8')
+  const write = (extra: string) => writeFileSync(join(root, 'fix.env'), base + extra, { mode: 0o600 })
+  write('REPOSITORIES=acme/site\n')
+  expect(await tick()).toMatchObject({ code: 2, stderr: expect.stringContaining('owner/name@repository_id') })
+  write('REPOSITORIES=acme/site@4242\nRELEASES=acme/site:deploy.yaml\n')
+  expect(await tick()).toMatchObject({ code: 2, stderr: expect.stringContaining('owner/name:.github/workflows/file.yaml') })
+  write('RELEASES=acme/site:.github/workflows/deploy.yaml\n')
+  expect(await tick()).toMatchObject({ code: 2, stderr: expect.stringContaining('which REPOSITORIES does not list') })
 })

@@ -10,20 +10,32 @@ as a pull request, done by the dev Agent. Cron runs `oncall-fix tick` every few 
   revising  the review asked for changes: the same Session gets them and pushes to the same branch, then review again
   ready     the review passed: a person reads the pull request and asks on the thread to merge it
   merging   `oncall-fix merge`: the same Session merges the reviewed head, or says why not (then ready again)
-  merged    the pull request was merged
-  needs_human, no_pr, failed: a person looks
+  merged    the pull request was merged; in a repository listed in RELEASES its release starts at once
+  releasing a new Session of the fix Agent, with the repository cloned, tags the head of main with the next vMAJOR.MINOR.PATCH,
+            dispatches the release workflow with that tag and waits for the run; `oncall-fix release` starts it for a pull
+            request a person merged, or again after a release that did not start
+  released  the run succeeded, or the merge was already in the latest version tag
+  needs_human, no_pr, failed, release_failed: a person looks
 
 Review runs at most --max-rounds times (default 2). Every change of stage that a person should know about is replied
 into the topic of the ticket's alert. The fix and review Agents, the SandBase key and the model gateway come from the
 config file (mode 0600):
 
   SANDBASE_AGENTS_URL, SANDBASE_API_KEY, FIX_AGENT_ID, REVIEW_AGENT_ID, MODEL_BASE_URL, MODEL_API_KEY, and DEV_AGENT_ID for designs
+  REPOSITORIES  owner/name@repository_id,... with the decimal ids github_list_repositories gives: every Session of a listed
+            repository starts with it cloned into /workspace, and the Agents work there with git. An unlisted repository's
+            Sessions start without a clone and use the file tools.
+  RELEASES  optional: owner/name:.github/workflows/file.yaml,... the listed repositories whose merged fixes are released, with
+            the workflow_dispatch workflow that takes the input `tag`. The fix Agent needs github_create_tag and
+            github_dispatch_workflow, and the workflow must be allowlisted. Everything merged on main ships with the fix:
+            whatever is merged there is ready to release.
 
 Which repositories can be changed is the Agents' GitHub authorization; this tool keeps no list. A ticket gets one fix, and
 at most three requests in all, one at a time; a design is asked for again only while none has opened a pull request.
 
   oncall-fix submit [--kind fix|design] --repository owner/name --brief FILE [--ticket ID]   (ticket: $DSH_SUPERAGENT_TICKET)
   oncall-fix merge [--pr NUMBER] [--ticket ID]   (when a person on the thread asked to merge a ready pull request)
+  oncall-fix release [--pr NUMBER] [--ticket ID]   (when a person on the thread merged a pull request and asks to release it)
   oncall-fix tick [--url http://127.0.0.1:3082] [--lark-cli lark-bot] [--dry-run]
   oncall-fix status
 
@@ -52,9 +64,13 @@ REPOSITORY = re.compile(r'^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$')
 TICKET = re.compile(r'^[0-9a-f]{8,64}$')
 MAX_BRIEF = 12000
 STAGE_HOURS = 3
-DONE = {'ready', 'merged', 'needs_human', 'no_pr', 'failed'}
+DONE = {'ready', 'merged', 'released', 'needs_human', 'no_pr', 'failed', 'release_failed'}
 SHA = re.compile(r'^[0-9a-f]{40}$')
 MAX_PER_TICKET = 3
+MAX_RELEASES = 3
+CLONE = re.compile(r'^([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@(\d+)$')
+RELEASE = re.compile(r'^([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+):(\.github/workflows/[A-Za-z0-9_.-]+\.ya?ml)$')
+VERSION = re.compile(r'^v\d+\.\d+\.\d+$')
 KINDS = {
     'fix': {'agent': 'FIX_AGENT_ID', 'name': '自动修复', 'pr': '修复 PR', 'who': '修复 Agent'},
     'design': {'agent': 'DEV_AGENT_ID', 'name': '设计方案', 'pr': '设计方案 PR', 'who': '开发 Agent'},
@@ -100,6 +116,21 @@ def load_config(path):
     for key in ('SANDBASE_AGENTS_URL', 'MODEL_BASE_URL'):
         if not values[key].startswith('https://'):
             raise Refused(f'{key} must be an https:// address')
+    entries = lambda key: filter(None, (part.strip() for part in values.get(key, '').split(',')))
+    values['clones'] = {}
+    for entry in entries('REPOSITORIES'):
+        match = CLONE.match(entry)
+        if not match:
+            raise Refused(f'REPOSITORIES entry {entry!r} must be owner/name@repository_id')
+        values['clones'][match[1].lower()] = match[2]
+    values['releases'] = {}
+    for entry in entries('RELEASES'):
+        match = RELEASE.match(entry)
+        if not match:
+            raise Refused(f'RELEASES entry {entry!r} must be owner/name:.github/workflows/file.yaml')
+        if match[1].lower() not in values['clones']:
+            raise Refused(f'RELEASES names {match[1]}, which REPOSITORIES does not list')
+        values['releases'][match[1].lower()] = {'repository_id': values['clones'][match[1].lower()], 'workflow': match[2]}
     return values
 
 
@@ -138,9 +169,12 @@ class Agents:
         except urllib.error.URLError as error:
             raise Failed(f'SandBase {method} {path.split("?")[0]} failed: {error.reason}') from None
 
-    def start(self, agent, title, text, key):
+    def start(self, agent, title, text, key, workspace=None):
         provider = {'type': 'custom', 'base_url': self.config['MODEL_BASE_URL'], 'api_key': self.config['MODEL_API_KEY']}
-        return self.call('POST', '/agents/sessions', {'agent_id': agent, 'title': title[:120], 'input': text, 'model_provider': provider}, key)['id']
+        body = {'agent_id': agent, 'title': title[:120], 'input': text, 'model_provider': provider}
+        if workspace:
+            body['github_workspace'] = {'repository_id': workspace}
+        return self.call('POST', '/agents/sessions', body, key)['id']
 
     def send(self, session, text, key):
         self.call('POST', f'/agents/sessions/{session}/events', {'input': text}, key)
@@ -184,6 +218,21 @@ def pull_request(items):
                 if str(result.get('pr_url', '')).startswith('https://github.com/'):
                     return result['pr_url'], int(result['pr_number'])
     return None, None
+
+
+def tool_results(items, name):
+    """The JSON results of the Session's completed calls of tool `name`, newest first."""
+    results = []
+    for item in items:
+        if item.get('type') == 'mcp_call' and item.get('name') == name and item.get('status') == 'completed':
+            for part in item.get('output') or []:
+                try:
+                    result = json.loads(part.get('text', '{}'))
+                except (ValueError, AttributeError):
+                    continue
+                if isinstance(result, dict):
+                    results.append(result)
+    return results
 
 
 def merged(items, number):
@@ -245,6 +294,29 @@ def review_task(fix, round_):
             f'On-call ticket: {fix["ticket"]}\n\nProblem the pull request should fix, as the on-call worker wrote it:\n\n{fix["brief"]}')
 
 
+def release_task(fix, release, sha, key):
+    known = fix.get('release_tag')
+    steps = (f'2. An earlier attempt already created tag {known} on {fix["release_sha"]}; do not create another and go to step 4 with it.\n'
+             if known else
+             f'2. latest=$(git tag -l \'v*\' | grep -E \'^v[0-9]+\\.[0-9]+\\.[0-9]+$\' | sort -V | tail -1). If '
+             f'git merge-base --is-ancestor {sha} "$latest" succeeds, the merge is already released: create and dispatch nothing, '
+             'and end with {"already_released": "<latest>"}.\n'
+             f'3. Call github_create_tag with repository_id {release["repository_id"]}, tag = $latest with its patch number plus one '
+             f'(v1.2.9 becomes v1.2.10), sha = the full origin/main commit from step 1, idempotency_key {key}-tag. If it answers '
+             'tag_exists, stop and report it; never pick another number.\n')
+    return (f'oncall-fix release request: pull request #{fix["pr_number"]} ({fix["pr_url"]}) of {fix["repository"]} is merged and '
+            'a person asked to release it. Everything merged on main is ready to release, so release the head of main.\n\n'
+            f'1. In /workspace: git fetch --force --tags origin main. If git merge-base --is-ancestor {sha} origin/main fails, the '
+            'pull request is not on main: do nothing else and say so. Note git rev-parse origin/main.\n' + steps +
+            f'4. Call github_dispatch_workflow with repository_id {release["repository_id"]}, workflow_path {release["workflow"]}, '
+            f'ref main, inputs {{"tag": "<the tag>"}}, idempotency_key {key}-dispatch.\n'
+            f'5. Wait for the run: every 2 minutes (sleep 120 in the shell) call github_read_workflow_runs with the run_id the dispatch '
+            f'returned, or with workflow_path {release["workflow"]} and branch main when it returned none, until the run is '
+            'completed or 45 minutes have passed.\n\n'
+            'Create no other tag, dispatch nothing else, push nothing and merge nothing. If a tool refuses, do not retry with another '
+            'key; report its error code and reason. End with one short answer: the tag, the run URL and its conclusion.')
+
+
 def tag(fix):
     """The fix's part of its Sessions' idempotency keys: the ticket's first one keeps the ticket alone."""
     return fix.get('tag') or fix['ticket'][:16]
@@ -286,8 +358,9 @@ def advance(args, agents, fix):
     """Move one fix forward as far as its Sessions allow; returns whether it changed."""
     kind = KINDS[fix.get('kind', 'fix')]
     if datetime.datetime.fromisoformat(fix['since']) < now() - datetime.timedelta(hours=STAGE_HOURS):
+        work = '发布' if fix['stage'] == 'releasing' else kind['name']
         fix.update(stage='failed', since=stamp(), reason=f'stage {fix["stage"]} took more than {STAGE_HOURS} h')
-        notify(args, fix, EVERYONE + f'**{kind["name"]}超时**：{STAGE_HOURS} 小时没有进展，需要人看。' + (f'PR：{fix["pr_url"]}' if fix.get('pr_url') else ''))
+        notify(args, fix, EVERYONE + f'**{work}超时**：{STAGE_HOURS} 小时没有进展，需要人看。' + (f'PR：{fix["pr_url"]}' if fix.get('pr_url') else ''))
         return True
     if fix['stage'] in ('fixing', 'revising'):
         status, items = settled(agents, fix['fix_session'], fix.get('fix_answer'))
@@ -308,7 +381,8 @@ def advance(args, agents, fix):
             notify(args, fix, f'**已提交{kind["pr"]}**：{url}\n正在自动审阅，结果会回复在这里。')
         fix['round'] = fix.get('round', 0) + 1
         fix['review_session'] = agents.start(args.review_agent, f'oncall-review: {fix["repository"]}#{fix["pr_number"]} round {fix["round"]}',
-                                             review_task(fix, fix['round']), f'oncall-review-{tag(fix)}-r{fix["round"]}')
+                                             review_task(fix, fix['round']), f'oncall-review-{tag(fix)}-r{fix["round"]}',
+                                             workspace=args.clones.get(fix['repository'].lower()))
         fix.update(stage='review', since=stamp(), review_answer=None)
         return True
     if fix['stage'] == 'review':
@@ -327,7 +401,7 @@ def advance(args, agents, fix):
             fix.update(stage='ready', since=stamp())
             risk = '低' if result.get('risk') == 'low' else '高'
             notify(args, fix, EVERYONE + f'**审阅通过，等人合并**（{risk}风险，第 {fix["round"]} 轮）：{fix["pr_url"]}\n{summary}\n'
-                   '看过后在本话题 @我 回复「合并」，由 Agent 合并。')
+                   '看过后在本话题 @我 回复「合并」，由 Agent 合并' + ('，合并后自动发布生产。' if fix['repository'].lower() in args.releases else '。'))
             return True
         if fix['round'] >= args.max_rounds:
             fix.update(stage='needs_human', since=stamp(), reason=f'{fix["round"]} review rounds left blockers')
@@ -352,9 +426,62 @@ def advance(args, agents, fix):
             notify(args, fix, EVERYONE + f'**没有合并**：{short(answer)}\n{fix["pr_url"]}')
             return True
         fix.update(stage='merged', since=stamp(), merge_sha=sha)
-        notify(args, fix, f'**已合并**：{fix["pr_url"]}')
+        release = args.releases.get(fix['repository'].lower())
+        notify(args, fix, f'**已合并**：{fix["pr_url"]}' + ('\n开始发布生产，结果会回复在这里。' if release else ''))
+        if release:
+            start_release(args, agents, fix, release)
         return True
+    if fix['stage'] == 'releasing':
+        return follow_release(args, agents, fix)
     return False
+
+
+def start_release(args, agents, fix, release):
+    attempt = fix.get('release_attempts', 0) + 1
+    key = f'oncall-release-{tag(fix)}-{attempt}'
+    sha = fix.get('merge_sha') or fix['head_sha']
+    fix['release_session'] = agents.start(args.fix_agent, f'oncall-release: {fix["repository"]}#{fix["pr_number"]}',
+                                          release_task(fix, release, sha, key), key, workspace=release['repository_id'])
+    fix.update(stage='releasing', since=stamp(), release_attempts=attempt, release_answer=None,
+               release_started=now().strftime('%Y-%m-%dT%H:%M:%SZ'))
+
+
+def follow_release(args, agents, fix):
+    status, items = settled(agents, fix['release_session'], fix.get('release_answer'))
+    if status == 'running':
+        return False
+    items = items or []
+    fix['release_answer'], answer = latest_answer(items)
+    created = next((r for r in tool_results(items, 'github_create_tag') if VERSION.match(str(r.get('tag', ''))) and SHA.match(str(r.get('sha', '')))), None)
+    if created:
+        fix.update(release_tag=created['tag'], release_sha=created['sha'])
+    dispatch = next((r for r in tool_results(items, 'github_dispatch_workflow') if r.get('status') == 'dispatched'), None)
+    if fix.get('release_tag') and dispatch:
+        runs = [run for result in tool_results(items, 'github_read_workflow_runs') for run in (result.get('data') or [result.get('run') or {}])]
+        wanted = str(dispatch.get('run_id') or '')
+        # Without a run_id, a workflow_dispatch run created after this release started is the one it dispatched.
+        run = next((run for run in runs if run.get('status') == 'completed' and
+                    (str(run.get('run_id')) == wanted if wanted else run.get('event') == 'workflow_dispatch'
+                     and str(run.get('created_at', '')) >= fix['release_started'])), None)
+        url = (run or {}).get('html_url') or dispatch.get('html_url') or ''
+        if run and run.get('conclusion') == 'success':
+            fix.update(stage='released', since=stamp(), run_url=url)
+            notify(args, fix, f'**已发布 {fix["release_tag"]}**：{fix["pr_url"]}\n部署：{url}')
+        else:
+            result = run.get('conclusion') if run else '没有等到结果'
+            fix.update(stage='release_failed', since=stamp(), run_url=url, reason=f'deploy run: {result}')
+            notify(args, fix, EVERYONE + f'**发布 {fix["release_tag"]} 未成功**（{result}），需要人看：{url}')
+        return True
+    shipped = re.search(r'"already_released"\s*:\s*"(v\d+\.\d+\.\d+)"', answer)
+    if status == 'done' and shipped and not created and not fix.get('release_tag'):
+        fix.update(stage='released', since=stamp(), release_tag=shipped[1])
+        notify(args, fix, f'**已上线**：合并已包含在 {shipped[1]} 中，不再重复发布：{fix["pr_url"]}')
+        return True
+    why = short(answer) if status == 'done' else '发布会话出错'
+    fix.update(stage='merged', since=stamp(), reason=short(answer, 500) if status == 'done' else 'the release Session failed')
+    notify(args, fix, EVERYONE + f'**没有发布**：{why}' + (f'\n已打 tag {fix["release_tag"]}，重试会直接用它触发部署。' if fix.get('release_tag') else '')
+           + f'\n{fix["pr_url"]}')
+    return True
 
 
 def refusal(mine, kind):
@@ -393,7 +520,8 @@ def command_submit(args, config):
             return 2
         key, fix_tag = (ticket, ticket[:16]) if not mine else (f'{ticket}:{len(mine) + 1}', f'{ticket[:16]}-{len(mine) + 1}')
         task = (design_task if args.kind == 'design' else fix_task)(args.repository, ticket, brief)
-        session = Agents(config).start(agent, f'oncall-{args.kind}: {args.repository} for ticket {ticket[:8]}', task, f'oncall-{args.kind}-{fix_tag}')
+        session = Agents(config).start(agent, f'oncall-{args.kind}: {args.repository} for ticket {ticket[:8]}', task, f'oncall-{args.kind}-{fix_tag}',
+                                       workspace=config['clones'].get(args.repository.lower()))
         fixes[key] = {'ticket': ticket, 'kind': args.kind, 'tag': fix_tag, 'repository': args.repository, 'brief': brief,
                       'fix_session': session, 'stage': 'fixing', 'created': stamp(), 'since': stamp()}
     print(json.dumps({'submitted': True, 'kind': args.kind, 'stage': 'fixing', 'session': session,
@@ -430,9 +558,44 @@ def command_merge(args, config):
     return 0
 
 
+def command_release(args, config):
+    ticket = args.ticket or os.environ.get('DSH_SUPERAGENT_TICKET', '')
+    if not TICKET.match(ticket):
+        raise Refused('--ticket (or DSH_SUPERAGENT_TICKET) must be a ticket id')
+    with state(args.state) as fixes:
+        mine = [fix for fix in fixes.values() if fix['ticket'] == ticket and fix.get('pr_number') and (args.pr is None or fix['pr_number'] == args.pr)]
+        waiting = [fix for fix in mine if fix['stage'] in ('ready', 'merged')]
+        if len(waiting) != 1:
+            why = 'no pull request of this ticket waits to be released' if not waiting else 'several wait: pass --pr'
+            print(json.dumps({'refused': why, 'requests': [{'stage': fix['stage'], 'pr_url': fix['pr_url'], 'tag': fix.get('release_tag')}
+                                                            for fix in mine]}, ensure_ascii=False))
+            return 2
+        fix = waiting[0]
+        release = config['releases'].get(fix['repository'].lower())
+        if not release:
+            why = f'{fix["repository"]} is not released by oncall-fix: a person releases it'
+            print(json.dumps({'refused': why, 'pr_url': fix['pr_url']}, ensure_ascii=False))
+            return 2
+        if fix.get('release_attempts', 0) >= MAX_RELEASES:
+            why = f'{MAX_RELEASES} release attempts did not start a release: a person releases it'
+            print(json.dumps({'refused': why, 'pr_url': fix['pr_url']}, ensure_ascii=False))
+            return 2
+        if not SHA.match(fix.get('merge_sha') or fix.get('head_sha') or (fix.get('verdicts') or [{}])[-1].get('head_sha') or ''):
+            print(json.dumps({'refused': 'the review recorded no head commit, so a person releases it', 'pr_url': fix['pr_url']}, ensure_ascii=False))
+            return 2
+        fix.setdefault('head_sha', (fix.get('verdicts') or [{}])[-1].get('head_sha'))
+        args.fix_agent = config['FIX_AGENT_ID']
+        start_release(args, Agents(config), fix, release)
+    print(json.dumps({'releasing': fix['pr_url'], 'note': 'the result is replied into this alert topic; do not wait for it'}, ensure_ascii=False))
+    return 0
+
+
 def command_tick(args, config):
     agents = Agents(config)
     args.review_agent = config['REVIEW_AGENT_ID']
+    args.fix_agent = config['FIX_AGENT_ID']
+    args.releases = config['releases']
+    args.clones = config['clones']
     errors = 0
     with state(args.state) as fixes:
         for fix in fixes.values():
@@ -452,7 +615,7 @@ def command_status(args):
     for fix in sorted(fixes.values(), key=lambda item: item['created']):
         created = datetime.datetime.fromisoformat(fix['created']).astimezone(SHANGHAI).strftime('%m-%d %H:%M')
         print(f'{created} {fix["ticket"][:8]} {fix.get("kind", "fix")} {fix["repository"]} {fix["stage"]} round {fix.get("round", 0)}',
-              fix.get('pr_url') or '', fix.get('reason', ''))
+              fix.get('pr_url') or '', fix.get('release_tag') or '', fix.get('reason', ''))
     return 0
 
 
@@ -474,6 +637,9 @@ def main():
     merge = sub.add_parser('merge', help='have the Agent that opened it merge the ticket\'s reviewed pull request')
     merge.add_argument('--pr', type=int)
     merge.add_argument('--ticket', default='')
+    release = sub.add_parser('release', help='have the fix Agent release the ticket\'s merged pull request')
+    release.add_argument('--pr', type=int)
+    release.add_argument('--ticket', default='')
     sub.add_parser('status', help='list the fixes')
     args = parser.parse_args()
     try:
@@ -484,6 +650,8 @@ def main():
             return command_submit(args, config)
         if args.command == 'merge':
             return command_merge(args, config)
+        if args.command == 'release':
+            return command_release(args, config)
         if not re.fullmatch(r'http://(127\.0\.0\.1|localhost)(:\d+)?/?', args.url):
             raise Refused('--url must be the loopback management API')
         if not 1 <= args.max_rounds <= 3:
