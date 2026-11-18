@@ -92,7 +92,7 @@ it('starts one fix Session per ticket with the configured gateway, and refuses a
 })
 
 it('takes a fix through a requested change to an approved review, replying in the alert topic', async () => {
-  await fix('submit', '--repository', 'acme/site', '--brief', join(root, 'brief.md'))
+  await fix('submit', '--repository', 'acme/site', '--brief', join(root, 'brief.md'), '--by', 'ou_alice')
   await tick()
   expect(stage().stage).toBe('fixing')
   finish('ses_1', answer('Opened #7.'), opened(7))
@@ -113,7 +113,7 @@ it('takes a fix through a requested change to an approved review, replying in th
   await tick()
   expect(stage().stage).toBe('ready')
   expect(replies()).toEqual([expect.stringMatching(/^\*\*已提交修复 PR\*\*：https:\/\/github\.com\/acme\/site\/pull\/7/),
-    expect.stringContaining('<at user_id="all"></at> **审阅通过，等人合并**（低风险，第 2 轮）')])
+    expect.stringMatching(/^<at user_id="ou_alice"><\/at> \*\*审阅通过，等人合并\*\*（低风险，第 2 轮）/)])
   expect(keys).toContain(`oncall-review-${TICKET.slice(0, 16)}-r2`)
   // A finished fix is left alone.
   await tick()
@@ -128,7 +128,8 @@ it('hands over to a person after two rounds with blockers, a review without a ve
   finish('ses_1', answer('Pushed.')); await tick()
   finish('ses_3', review('changes_requested', '仍然缺少测试')); await tick()
   expect(stage()).toMatchObject({ stage: 'needs_human', round: 2 })
-  expect(replies().at(-1)).toContain('**2 轮审阅后仍有阻塞问题**，需要人看：https://github.com/acme/site/pull/8')
+  // Without --by no one is mentioned, and never everyone.
+  expect(replies().at(-1)).toMatch(/^\*\*2 轮审阅后仍有阻塞问题\*\*，需要人看：https:\/\/github\.com\/acme\/site\/pull\/8/)
 
   rmSync(join(root, 'state.json')); rmSync(join(root, 'replies.md'))
   await fix('submit', '--repository', 'acme/site', '--brief', join(root, 'brief.md'))
@@ -209,14 +210,15 @@ it('merges a reviewed pull request through the Session that opened it, only when
   expect(replies().at(-1)).toContain('回复「合并」，由 Agent 合并')
 
   // The head changed since the review: the Agent does not merge, and the fix waits again.
-  expect(await fix('merge')).toMatchObject({ code: 0 })
-  expect(stage()).toMatchObject({ stage: 'merging', head_sha: 'f'.repeat(40) })
+  expect(await fix('merge', '--by', 'not-an-id')).toMatchObject({ code: 2, stderr: expect.stringContaining('--by') })
+  expect(await fix('merge', '--by', 'ou_bob')).toMatchObject({ code: 0 })
+  expect(stage()).toMatchObject({ stage: 'merging', head_sha: 'f'.repeat(40), by: 'ou_bob' })
   expect(sessions.get('ses_1')!.events.at(-1)).toContain(`expected_head_sha ${'f'.repeat(40)}`)
   expect(await fix('merge')).toMatchObject({ code: 2 })
   finish('ses_1', mergedBy(7, false), answer('conflict head_changed: the branch moved after review.'))
   await tick()
   expect(stage().stage).toBe('ready')
-  expect(replies().at(-1)).toContain('**没有合并**：conflict head_changed')
+  expect(replies().at(-1)).toMatch(/^<at user_id="ou_bob"><\/at> \*\*没有合并\*\*：conflict head_changed/)
 
   expect(await fix('merge', '--pr', '7')).toMatchObject({ code: 0 })
   expect(keys.filter(key => key.startsWith('oncall-merge-'))).toEqual([`oncall-merge-${TICKET.slice(0, 16)}-7-1`, `oncall-merge-${TICKET.slice(0, 16)}-7-2`])
@@ -273,10 +275,10 @@ it('releases a pull request a person merged on GitHub when asked, finds a releas
 
   rmSync(join(root, 'state.json'))
   await ready()
-  await fix('release')
+  await fix('release', '--by', 'ou_carol')
   finish(stage().release_session, answer('github_dispatch_workflow refused: app_permission_not_granted.'), tagged('v0.2.11')); await tick()
   expect(stage()).toMatchObject({ stage: 'merged', release_tag: 'v0.2.11' })
-  expect(replies().at(-1)).toContain('<at user_id="all"></at> **没有发布**：github_dispatch_workflow refused')
+  expect(replies().at(-1)).toMatch(/^<at user_id="ou_carol"><\/at> \*\*没有发布\*\*：github_dispatch_workflow refused/)
   expect(replies().at(-1)).toContain('已打 tag v0.2.11，重试会直接用它触发部署。')
   expect(await fix('release')).toMatchObject({ code: 0 })
   const second = stage().release_session
@@ -292,7 +294,7 @@ it('releases a pull request a person merged on GitHub when asked, finds a releas
   await ready(); await fix('release')
   finish(stage().release_session, answer('Deploy failed.'), runOf('6', 'failure'), dispatched('6'), tagged('v0.2.12')); await tick()
   expect(stage()).toMatchObject({ stage: 'release_failed', run_url: 'https://github.com/acme/site/actions/runs/6' })
-  expect(replies().at(-1)).toContain('<at user_id="all"></at> **发布 v0.2.12 未成功**（failure）')
+  expect(replies().at(-1)).toMatch(/^\*\*发布 v0\.2\.12 未成功\*\*（failure）/)
 })
 
 it('refuses a bad REPOSITORIES or RELEASES entry, and a release of a repository without a clone', async () => {
