@@ -109,11 +109,20 @@ it('draws a range answer into a PNG in the current directory through CHART_PYTHO
     expect(await run(['prom', '--env', 'prod', 'chart', '--query', 'up', '--title', 't', '--out', out])).toMatchObject({ code: 2 })
   }
 })
-it('prints the known-issues list the ticket digest keeps, or says there is none yet', async () => {
+it('prints the known-issues list the ticket digest keeps, or only the issues that mention given words, or says there is none yet', async () => {
   expect(await run(['known'])).toMatchObject({ code: 0, stdout: expect.stringContaining('No known-issues list yet') })
   writeFileSync(join(root, 'config', 'known-issues.md'), '# 已知问题\n- **provider-a 计费停用**\n')
   expect(await run(['known'])).toMatchObject({ code: 0, stdout: '# 已知问题\n- **provider-a 计费停用**\n' })
-  expect(await run(['known', 'extra'])).toMatchObject({ code: 2 })
+  writeFileSync(join(root, 'config', 'known-issues.md'), '# 已知问题\n\n新告警先对照这里。\n\n'
+    + '- **provider-a 计费停用**（`a`）：`provider-a` 返回 402。\n- **/use-cases 返回 404**（`b`）：栏目整体 404。\n'
+    + '- **Gemini 账号池耗尽**（`c`）：`cheapaimodel` 返回 503。\n')
+  // With words, the issues that mention one in full and the others by title only.
+  expect((await run(['known', 'PROVIDER-A', 'cheapaimodel'])).stdout).toBe('# 已知问题\n新告警先对照这里。\n\n'
+    + '- **provider-a 计费停用**（`a`）：`provider-a` 返回 402。\n- **Gemini 账号池耗尽**（`c`）：`cheapaimodel` 返回 503。\n\n'
+    + 'Other known issues (1), by title; run `dsh-oncall known <word>` for one: /use-cases 返回 404\n')
+  expect((await run(['known', 'nothing-like-it'])).stdout).toContain('No known issue mentions nothing-like-it.')
+  expect(await run(['known', 'x'])).toMatchObject({ code: 2 })
+  expect(await run(['known', ...Array.from({ length: 9 }, (_, index) => `w${index}`)])).toMatchObject({ code: 2 })
 })
 it('lists the description, regions and topic names that route an alert, never topic ids or endpoints', async () => {
   config('prod-a', [`CLS_SECRET_ID=${SECRET_ID}`, `CLS_SECRET_KEY=${SECRET_KEY}`, 'CLS_REGION=ap-singapore',

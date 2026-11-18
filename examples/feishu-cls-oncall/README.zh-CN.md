@@ -274,7 +274,7 @@ worker 可以用 `dsh-oncall prom --env <env> chart --query ... --title ... --ou
 - 把日报发到告警群：先列需要人处理的问题（多少张工单、该找谁、建议做什么），再列无需处理的。
 - 更新已知问题清单 `~/.config/dsh-oncall/known-issues.json`，同时写一份 `known-issues.md`。两天没有新工单的问题标为安静，一周后从清单里移除。
 
-worker 排查前先跑 `dsh-oncall known` 看这份清单。新告警如果是已知问题，就用一两条查询确认原因没变，然后简短回复，不再从头排查。
+worker 排查前先跑 `dsh-oncall known <告警的策略名、供应商、模型或页面路径>`：和这些词有关的已知问题全文列出，其余只列标题。新告警如果是已知问题，就用一两条查询确认原因没变，然后简短回复，不再从头排查。
 
 模型走 profile 里同一个 Anthropic 兼容网关，key 从 `~/.dsh/.credentials.yaml` 里的 `ONCALL_LLM_API_KEY` 读取，不会打印出来。cron 示例：
 
