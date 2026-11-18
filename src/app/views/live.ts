@@ -1,5 +1,6 @@
 /** Live view: the whole pipeline at once, from Sources through Router and workers to replies, for watching the agent run. */
 import { latestAssignment, latestReport, ticketStage, type Ticket } from '../../core/index.ts'
+import type { Activity } from '../../executor/activity.ts'
 import { workerSessionId, type WorkerActivity } from '../../executor/dsh.ts'
 import { newestFirst, snapshot, threadSummary, type Snapshot, type ViewHost } from './records.ts'
 import { preview } from './text.ts'
@@ -24,7 +25,8 @@ function trace(view: Snapshot, ticket: Ticket) {
     endedAt: ticket.ended?.at }
 }
 
-export function liveView(host: ViewHost, overview: OverviewView, workers: readonly WorkerActivity[], routerBusy: boolean) {
+export function liveView(host: ViewHost, overview: OverviewView, workers: readonly WorkerActivity[], routerBusy: boolean,
+  activity: (ticketIds: readonly string[]) => ReadonlyMap<string, Activity>) {
   const view = snapshot(host)
   const { store } = view
   const active = new Map(workers.map(worker => [worker.ticketId, worker]))
@@ -37,7 +39,10 @@ export function liveView(host: ViewHost, overview: OverviewView, workers: readon
       sessionId: ticket.assignments.some(item => item.startedAt) ? workerSessionId(ticket.id) : '' }
   }
   const rank = (item: ReturnType<typeof row>) => item.slot ? ORDER.slot : ORDER[item.stage]
-  const open = store.tickets.open().sort(newestFirst).map(row).sort((a, b) => rank(a) - rank(b))
+  const sorted = store.tickets.open().sort(newestFirst).map(row).sort((a, b) => rank(a) - rank(b)).slice(0, SHOWN)
+  const done = activity(sorted.filter(item => item.sessionId).map(item => item.id))
+  const open = sorted.map(item => { const value = done.get(item.id); return value ? { ...item, activity: value } : item })
+  const total = store.tickets.open().length
   const evaluating = store.threads.active().filter(thread => thread.evaluating).map(thread => {
     const summary = threadSummary(view, thread)
     return { key: summary.key, title: summary.title, source: summary.source, startedAt: summary.evaluating!.startedAt,
@@ -54,7 +59,7 @@ export function liveView(host: ViewHost, overview: OverviewView, workers: readon
     outbox: { failing: problems.filter(kind => kind === 'outgoing').length },
     sources: { failing: problems.filter(kind => kind === 'source-error' || kind === 'no-source' || kind === 'setup').length },
     problems: problems.length,
-    tickets: open.slice(0, SHOWN), total: open.length,
+    tickets: open, total,
     trace: latest ? trace(view, latest) : undefined,
   }
 }

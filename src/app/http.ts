@@ -38,7 +38,7 @@ export interface HttpHost {
   readonly sessions: Pick<Sessions, 'status' | 'notify' | 'delivery'>
   readonly settings: Pick<Settings, 'view' | 'save' | 'pause' | 'sync' | 'refreshLabels'>
   readonly engine: EngineForPeople
-  readonly executor: Pick<DshExecutor, 'activeCount' | 'workers'>
+  readonly executor: Pick<DshExecutor, 'activeCount' | 'workers' | 'activity'>
   readonly health: Record<string, Health>
   readonly machine: Machine
   readonly masterId: string
@@ -170,7 +170,8 @@ function routes(runtime: HttpHost): Routes {
   return {
     'GET state': () => stateView(runtime),
     'GET overview': () => overviewOf(runtime),
-    'GET live': () => liveView(views(runtime), overviewOf(runtime), runtime.executor.workers(), runtime.routerBusy()),
+    'GET live': () => liveView(views(runtime), overviewOf(runtime), runtime.executor.workers(), runtime.routerBusy(),
+      ids => runtime.executor.activity(ids)),
     'GET search': ({ query }) => search(views(runtime), query.q ?? '', runtime.sourceLinks),
     'GET sources': () => sourcesStatus(views(runtime), runtime.health, setupState(runtime)),
     'GET settings': () => settingsView(store, runtime.sources, runtime.health, setupState(runtime), runtime.machine.stateDir),
