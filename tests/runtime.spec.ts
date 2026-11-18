@@ -547,6 +547,18 @@ it('relaunches running assignments after a restart with a recovery note', async 
   expect(relays(`worker-${ticket.id}`)).toEqual([{ ticket_id: ticket.id, assignment: 2 }, { text: expect.stringContaining('host restarted') }])
 })
 
+it('answers the live view with the Router, the flow and each open Ticket on the worker floor', async () => {
+  const { ticket } = await acceptedTicket()
+  const { status, body } = await api('GET', 'live')
+  expect(status).toBe(200)
+  expect(body).toMatchObject({ router: { busy: expect.any(Boolean), evaluating: [], overdue: 0, unavailable: 0 },
+    executor: { maxWorkers: 3, paused: false, person: 0 }, outbox: { failing: 0 }, total: 1,
+    tickets: [{ id: ticket.id, title: '修复回归', stage: 'working', jobs: 0, sessionId: `worker-${ticket.id}` }] })
+  const row = (body as { tickets: { slot: boolean; turn: boolean }[] }).tickets[0]!
+  // A worker whose turn runs holds a slot; one that does not hold a slot has no turn.
+  expect(row.turn ? row.slot : true).toBe(true)
+})
+
 it('projects read models for the management page and removes thread subscriptions from the Web surface', async () => {
   const { ticket, trigger } = await acceptedTicket()
   const threadKeyValue = `feishu:${CHAT}:om_1`

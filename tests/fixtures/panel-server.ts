@@ -108,6 +108,7 @@ export interface PanelServer {
   opened: string[]
   dropped: DroppedReply[]
   failing: Extract<Problem, { kind: 'outgoing' }>['outgoing'][]
+  live: ApiResponse<'GET live'>
 }
 export let server: PanelServer
 
@@ -201,6 +202,27 @@ const overviewView = (): ApiResponse<'GET overview'> => {
     policyVersion: 'abcdef1234567890',
   }
 }
+const liveRow = (fields: Partial<ApiResponse<'GET live'>['tickets'][number]>): ApiResponse<'GET live'>['tickets'][number] => ({
+  id: 't1', title: '修复回归', stage: 'working', slot: true, turn: true, jobs: 0, source: 'feishu', startedAt: '2026-09-22T00:01:00Z',
+  updatedAt: '2026-09-22T00:02:00Z', sessionId: `worker-${fields.id ?? 't1'}`, ...fields } as ApiResponse<'GET live'>['tickets'][number])
+export const liveView = (): ApiResponse<'GET live'> => ({
+  at: '2026-09-22T00:12:00Z',
+  router: { busy: true, evaluating: [{ key: 'github:9', title: '#9 按钮颜色', source: 'github', startedAt: '2026-09-22T23:59:00Z',
+    deadline: '2026-09-23T00:01:00Z' }], overdue: 0, unavailable: 0 },
+  flow: { received: 12, filtered: 2, triggers: 10, judged: 5, accepted: 1, evaluating: 1, dropped: 0 },
+  executor: { running: 2, queued: 1, maxWorkers: 3, idle: 1, paused: false, person: 1 },
+  outbox: { failing: 0 }, sources: { failing: 0 }, problems: 0,
+  tickets: [liveRow({}), liveRow({ id: 't2', title: '跑压测', turn: false, jobs: 2 }),
+    liveRow({ id: 't3', title: '待回答的问题', slot: false, turn: false, stage: 'person', action: 'answer' }),
+    liveRow({ id: 't5', title: '排队的工单', slot: false, turn: false, stage: 'working', action: 'queued', startedAt: undefined, sessionId: '' }),
+    liveRow({ id: 't6', title: '等新消息', slot: false, turn: false, stage: 'idle' })],
+  total: 5,
+  trace: { ticketId: 't1', title: '修复回归', stage: 'working', createdAt: '2026-09-22T00:00:30Z',
+    trigger: { source: 'feishu', actor: actor('feishu', MEMBER), at: '2026-09-22T00:00:00Z', preview: '@bot 登录页又白屏了' },
+    decision: { kind: 'accept', reason: [{ code: 'said', values: { text: '明确要求修复' } }], strength: 'explicit', at: '2026-09-22T00:00:30Z' },
+    startedAt: '2026-09-22T00:01:00Z', report: { state: 'progress', summary: '已复现，正在查 CLS 日志', at: '2026-09-22T00:05:00Z' },
+    endedAt: undefined },
+})
 export const acceptDecision = (): NonNullable<TicketPageView['decision']> => ({ id: 'd1', kind: 'accept', outcome: 'accept',
   reason: [{ code: 'explicitRouted' }], at: '2026-09-22T00:00:00Z', strength: 'explicit', ticketId: undefined,
   triggerIds: ['e1'], thread: 'feishu:oc_1:om_root', rules: [], preview: '@bot 修一下', ticketTitle: undefined })
@@ -247,7 +269,7 @@ function initial(): PanelServer {
     en: 'Feishu message' } }
   const defaults = { revision: 0, previousRevision: null, savedAt: '', source: 'defaults' }
   return {
-    health: {}, down: false, pending: 0, opened: [], requests: [], misuse: [], queued: new Set(), dropped: [], failing: [],
+    live: liveView(), health: {}, down: false, pending: 0, opened: [], requests: [], misuse: [], queued: new Set(), dropped: [], failing: [],
     setup: { machine: MACHINE, problem: null, feishuProblem: null,
       accounts: { repository: 'acme/widgets', agent: 'agent-bot', feishu: { appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',
         name: 'Widgets Bot' } } },
@@ -293,6 +315,7 @@ const SourceSave = z.object({ enabled: z.boolean(), config: z.unknown() })
 const ROUTES: { [K in keyof Api]: Route<K> } = {
   'GET state': { answer: stateView },
   'GET overview': { answer: overviewView },
+  'GET live': { answer: () => server.live },
   'GET search': { query: ['q'], answer: async ({ query }) => {
     const q = query.q ?? ''
     await server.searching?.(q)
