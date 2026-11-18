@@ -559,6 +559,24 @@ it('answers the live view with the Router, the flow and each open Ticket on the 
   expect(row.turn ? row.slot : true).toBe(true)
 })
 
+it('shows what an ended Ticket\'s worker spent on the live view, reading its stored Session once', async () => {
+  const { ticket } = await acceptedTicket()
+  runtime.engine.stopTicket(ticket.id)
+  await runtime.idle()
+  // The worker's Session is no longer loaded once its ticket ended a while ago.
+  agents.delete(`worker-${ticket.id}`)
+  controller.inspect.mockClear()
+  controller.inspect.mockResolvedValue({ events: [
+    { type: 'tool/call', time: Date.parse('2026-11-18T00:00:00Z'), data: { name: 'bash', arguments: '{"command":"ls"}' } },
+    { type: 'assistant/message', time: Date.parse('2026-11-18T00:00:05Z'), data: { usage: { inputTokens: 900, outputTokens: 100 } } }] })
+  const recent = async () => ((await api('GET', 'live')).body as { recent: { id: string; cost?: unknown }[] }).recent
+  const first = await recent()
+  expect(first[0]!.id).toBe(ticket.id)
+  await vi.waitFor(async () => expect((await recent())[0]!.cost).toEqual({ tools: 1, tokens: 1000, errors: 0 }))
+  await recent()
+  expect(controller.inspect.mock.calls.filter(([id]) => id === `worker-${ticket.id}`).length).toBeLessThanOrEqual(1)
+})
+
 it('projects read models for the management page and removes thread subscriptions from the Web surface', async () => {
   const { ticket, trigger } = await acceptedTicket()
   const threadKeyValue = `feishu:${CHAT}:om_1`

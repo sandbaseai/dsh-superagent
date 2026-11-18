@@ -228,6 +228,8 @@ export class DshExecutor implements Executor {
   private readonly timers = new Set<ReturnType<typeof setTimeout>>()
   /** What each open ticket's worker and its subagents did lately, for the live view. */
   private readonly activities = new Activities()
+  /** The unloaded worker Sessions being read for their activity, by ticket. */
+  private readonly reading = new Set<string>()
   /** Registers the `launch` and `delivery` effect handlers; both are held (concurrency limit 0) while processing is paused. */
   constructor(private readonly host: ExecutorHost) {
     this.slots = new WorkerSlots(() => host.store.tickets.open().filter(ticket => this.running(ticket)).map(ticket => ticket.id),
@@ -418,10 +420,20 @@ export class DshExecutor implements Executor {
     for (const id of ticketIds) {
       const agent = this.host.context.agents.get(workerSessionId(id) as SessionId)
       if (agent) this.activities.seed(id, () => agent.session.snapshotEvents() as readonly ActivityEvent[])
+      else if (!this.activities.read(id) && !this.reading.has(id)) this.readActivity(id)
       const value = this.activities.get(id)
       if (value) found.set(id, value)
     }
     return found
+  }
+  /** Read an unloaded worker's stored Session once, in the background; the next look shows what it did. */
+  private readActivity(ticketId: string): void {
+    this.reading.add(ticketId)
+    void this.host.context.sessionController.inspect(workerSessionId(ticketId) as SessionId)
+      .then(({ events }) => { this.activities.seed(ticketId, () => events as readonly ActivityEvent[]) })
+      // A Session that was never created or was deleted has nothing to show.
+      .catch(() => { this.activities.seed(ticketId, () => []) })
+      .finally(() => { this.reading.delete(ticketId) })
   }
   /** The ticket a worker Session, or a subagent at any depth below one, works for. */
   private ticketUnder(sessionId: string, parent: string | undefined): string | undefined {
