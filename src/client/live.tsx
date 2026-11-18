@@ -14,6 +14,7 @@ const BAR_MS = 30 * 60_000
 export const QUIET_MS = 5 * 60_000
 type Row = LiveView['tickets'][number]
 type Trace = NonNullable<LiveView['trace']>
+type Day = LiveView['day']
 export type WorkState = 'turn' | 'background' | 'person' | 'queued' | 'idle'
 
 export const workState = (row: Row): WorkState => row.slot ? row.turn ? 'turn' : 'background'
@@ -159,6 +160,32 @@ function TraceView({ trace, now }: { trace: Trace; now: string }) {
   </Section>
 }
 
+function DayView({ day }: { day: Day }) {
+  const { t } = usePanel()
+  const peak = Math.max(1, ...day.hours.map(hour => hour.opened))
+  const figure = (label: string, value: ReactNode, note?: string) => <span className="dt-live-big">
+    <b>{value}</b><span>{label}</span>{note && <span className="dt-live-muted">{note}</span>}</span>
+  const local = (at: string) => new Date(at).getHours()
+  return <Section title={t('liveDayTitle')} hint={t('liveDayHint')}>
+    <div className="dt-live-day">
+      <div className="dt-live-bigs">
+        {figure(t('liveWaitP50'), duration(t, day.wait.p50), t('liveP95', { time: duration(t, day.wait.p95) }))}
+        {figure(t('liveWaited'), `${day.wait.waited} / ${day.wait.count}`)}
+        {figure(t('liveWorkP50'), duration(t, day.work.p50), t('liveP95', { time: duration(t, day.work.p95) }))}
+      </div>
+      <div className="dt-live-hours" role="img" aria-label={t('liveHoursLabel')}>
+        {day.hours.map(hour => <span key={hour.at} className="dt-live-hour"
+          title={t('liveHourTip', { hour: local(hour.at), opened: hour.opened, waited: hour.waited })}>
+          <span className="dt-live-hour-bar" style={{ height: `${hour.opened / peak * 100}%` }}>
+            {hour.waited > 0 && <span style={{ height: `${hour.waited / hour.opened * 100}%` }} />}
+          </span>
+          <span className="dt-live-hour-label">{local(hour.at) % 6 === 0 ? local(hour.at) : ''}</span>
+        </span>)}
+      </div>
+    </div>
+  </Section>
+}
+
 function TicketRow({ row }: { row: Row }) {
   const { t, navigate } = usePanel()
   const state = workState(row)
@@ -189,6 +216,7 @@ export function LivePage() {
     <Topology data={data} />
     <Headline data={data} />
     {data.trace && <TraceView trace={data.trace} now={data.at} />}
+    <DayView day={data.day} />
     {data.router.evaluating.length > 0 && <Section title={t('liveEvaluatingTitle')} count={data.router.evaluating.length}>
       <ul className="dt-list">{data.router.evaluating.map(thread => <li key={thread.key} className="dt-row dt-link">
         <div className="dt-row-main">

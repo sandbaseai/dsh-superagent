@@ -223,6 +223,9 @@ export const liveView = (): ApiResponse<'GET live'> => ({
     decision: { kind: 'accept', reason: [{ code: 'said', values: { text: '明确要求修复' } }], strength: 'explicit', at: '2026-09-22T00:00:30Z' },
     startedAt: '2026-09-22T00:01:00Z', report: { state: 'progress', summary: '已复现，正在查 CLS 日志', at: '2026-09-22T00:05:00Z' },
     endedAt: undefined },
+  day: { wait: { count: 20, p50: 2000, p95: 190_000, waited: 3 }, work: { count: 18, p50: 250_000, p95: 610_000 },
+    hours: Array.from({ length: 24 }, (_, index) => ({ at: new Date(Date.UTC(2026, 8, 21, index)).toISOString(), opened: index % 5,
+      waited: index === 9 ? 2 : index === 14 ? 1 : 0 })) },
 })
 export const acceptDecision = (): NonNullable<TicketPageView['decision']> => ({ id: 'd1', kind: 'accept', outcome: 'accept',
   reason: [{ code: 'explicitRouted' }], at: '2026-09-22T00:00:00Z', strength: 'explicit', ticketId: undefined,

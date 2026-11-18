@@ -442,6 +442,13 @@ a.dt-btn, a.dt-btn:hover { text-decoration: none; }
 .dt-live-legend > [data-part='eval']::before { background: var(--dsw-alias-brand-primary); }
 .dt-live-legend > [data-part='slot']::before { background: var(--dsw-alias-state-warn-primary); }
 .dt-live-legend > [data-part='work']::before { background: var(--dsw-alias-state-success-primary); }
+.dt-live-day { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 16px 40px; }
+.dt-live-big .dt-live-muted { font-size: 12px; }
+.dt-live-hours { flex: 1 1 320px; display: flex; align-items: stretch; gap: 3px; height: 72px; }
+.dt-live-hour { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; gap: 4px; min-width: 0; }
+.dt-live-hour-bar { display: flex; flex-direction: column; justify-content: flex-end; min-height: 2px; border-radius: 3px 3px 0 0; background: color-mix(in srgb, var(--dsw-alias-label-primary) 22%, transparent); overflow: hidden; }
+.dt-live-hour-bar > span { display: block; background: var(--dsw-alias-state-warn-primary); }
+.dt-live-hour-label { height: 14px; font-size: 11px; line-height: 14px; color: var(--dsw-alias-label-caption); text-align: center; font-variant-numeric: tabular-nums; }
 @keyframes dt-live-march { to { background-position: 8px 0; } }
 @keyframes dt-live-pulse { 50% { opacity: 0.35; } }
 @media (prefers-reduced-motion: reduce) {

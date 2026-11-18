@@ -38,6 +38,15 @@ it('shows what each worker did last, with its subagents, tool calls and tokens, 
   expect(text()).toContain('7 分钟没有动作')
 })
 
+it('shows the last day\'s slot wait and time to report, with each hour\'s Tickets and those that waited', async () => {
+  at({ page: 'live' })
+  await mount()
+  expect(all('.dt-live-day .dt-live-big').map(item => item.textContent))
+    .toEqual(['2 秒等工位 p50p95 3 分钟', '3 / 20等过工位', '4 分钟交报告 p50p95 10 分钟'])
+  expect(all('.dt-live-hour')).toHaveLength(24)
+  expect(all('.dt-live-hour-bar > span')).toHaveLength(2)
+})
+
 it('opens the Router\'s main Session and each worker\'s Session from its card', async () => {
   at({ page: 'live' })
   await mount()
