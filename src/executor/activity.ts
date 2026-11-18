@@ -48,6 +48,7 @@ export class Activities {
    * Read the worker's Session once, in place of what was recorded before: the Session holds the worker's own events since the
    * ticket began, which a restart does not lose. Subagents' events reach the record only as they happen.
    */
+  read(ticketId: string): boolean { return this.seeded.has(ticketId) }
   seed(ticketId: string, events: () => readonly ActivityEvent[]): void {
     if (this.seeded.has(ticketId)) return
     this.seeded.add(ticketId)
