@@ -408,11 +408,12 @@ export class DshExecutor implements Executor {
   activeCount(): number { return this.host.store.tickets.open().filter(ticket => this.running(ticket)).length }
   /** The workers that hold a slot: whether their turn runs, or only their background work does, and how many shell jobs they own. */
   /**
-   * What each open ticket's worker and its subagents did lately: each loaded worker's Session is read once (see
+   * What each listed ticket's worker and its subagents did, open or ended; records of other ended tickets are dropped. Each
+   * loaded worker's Session is read once (see
    * `Activities.seed`), then events as they happen.
    */
   activity(ticketIds: readonly string[]): Map<string, Activity> {
-    this.activities.keep(new Set(this.host.store.tickets.open().map(ticket => ticket.id)))
+    this.activities.keep(new Set([...this.host.store.tickets.open().map(ticket => ticket.id), ...ticketIds]))
     const found = new Map<string, Activity>()
     for (const id of ticketIds) {
       const agent = this.host.context.agents.get(workerSessionId(id) as SessionId)
