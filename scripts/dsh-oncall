@@ -205,14 +205,34 @@ def routing(values):
     return facts
 
 
-def command_known():
-    """Print the known open issues the daily ticket digest keeps in the config directory, or say there is no list yet."""
+KNOWN_WORDS = 8
+KNOWN_ISSUE = re.compile(r'^- \*\*(.+?)\*\*')
+
+
+def command_known(words=()):
+    """Print the known open issues the daily ticket digest keeps in the config directory, or say there is no list yet.
+
+    With words, print in full only the issues that mention one of them, case-insensitively, and the others by title.
+    """
     path = config_dir() / 'known-issues.md'
     try:
         text = path.read_text(encoding='utf-8')
     except FileNotFoundError:
         sys.stdout.write('No known-issues list yet: investigate the alarm on its own.\n')
         return 0
+    if words:
+        needles = [word.lower() for word in words]
+        lines = text.split('\n')
+        first = next((index for index, line in enumerate(lines) if KNOWN_ISSUE.match(line)), len(lines))
+        head = [line for line in lines[:first] if line.strip()]
+        issues = [line for line in lines if KNOWN_ISSUE.match(line)]
+        matched = [line for line in issues if any(needle in line.lower() for needle in needles)]
+        others = [KNOWN_ISSUE.match(line).group(1) for line in issues if line not in matched]
+        parts = ['\n'.join(head), '']
+        parts += matched or [f'No known issue mentions {", ".join(words)}.']
+        if others:
+            parts += ['', f'Other known issues ({len(others)}), by title; run `dsh-oncall known <word>` for one: ' + '; '.join(others)]
+        text = '\n'.join(parts) + '\n'
     sys.stdout.write(cut(text, MAX_OUTPUT)[0])
     return 0
 
@@ -1077,7 +1097,7 @@ def command_grafana(args):
 
 USAGE = """usage:
   dsh-oncall envs
-  dsh-oncall known
+  dsh-oncall known [<word> ...]
   dsh-oncall cls --env E --query Q [--topic ID_OR_NAME] [--from -15m] [--to now] [--limit 50] [--sort desc]
   dsh-oncall kube --env E <kubectl read args...>
   dsh-oncall monitor --env E --action GetMonitorData|DescribeAlarmHistories|DescribeBaseMetrics|DescribeAlarmPolicies
@@ -1162,9 +1182,9 @@ def run(argv):
         return 0 if argv else 2
     command, rest = argv[0], argv[1:]
     if command == 'known':
-        if rest:
-            raise Refused('refused: known takes no arguments')
-        return command_known()
+        if len(rest) > KNOWN_WORDS or any(len(word.strip()) < 2 or len(word) > 80 for word in rest):
+            raise Refused(f'refused: known takes at most {KNOWN_WORDS} words, each 2 to 80 characters')
+        return command_known(tuple(word.strip() for word in rest))
     if command == 'envs':
         if rest:
             raise Refused('refused: envs takes no arguments')
