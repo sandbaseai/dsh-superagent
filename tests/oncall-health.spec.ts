@@ -47,20 +47,28 @@ it('says nothing while the service is healthy', async () => {
   expect(calls()).toEqual(['status'])
 })
 
-it('posts a part\'s error once, not again within the repeat window, and its recovery once', async () => {
+it('posts a part\'s error from its second failing check, not again within the repeat window, and its recovery once', async () => {
   writeFileSync(join(root, 'status-codes'), '2')
+  expect(await check()).toMatchObject({ code: 0, stdout: expect.not.stringContaining('posted') })
+  expect(sent()).toEqual([])
   expect((await check()).code).toBe(0)
   expect(await check()).toMatchObject({ code: 0, stdout: expect.not.stringContaining('posted') })
   expect(sent()).toHaveLength(1)
   expect(sent()[0]).toContain('有部分报错，重启修不好')
   expect(sent()[0]).toContain('- `history`: read failed: 403')
   // A restart does not fix a part's error, so none was tried.
-  expect(calls()).toEqual(['status', 'status'])
+  expect(calls()).toEqual(['status', 'status', 'status'])
   writeFileSync(join(root, 'status-codes'), '0')
   await check(); await check()
   expect(sent()).toHaveLength(2)
   expect(sent()[1]).toContain('已恢复正常')
   expect(readFileSync(join(root, 'sends.log'), 'utf8').split('\n')[0]).toBe('im +messages-send --chat-id oc_ops --markdown @health.md --as bot')
+})
+
+it('says nothing about a part\'s error that the next check no longer reports', async () => {
+  writeFileSync(join(root, 'status-codes'), '2 0 2 0')
+  for (let i = 0; i < 4; i++) await check()
+  expect(sent()).toEqual([])
 })
 
 it('posts the same problem again after the repeat window', async () => {

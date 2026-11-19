@@ -7,7 +7,7 @@ Run it from cron, for example hourly. It runs `scripts/dsh-superagent status`:
 - exit 1 (stopped, duplicated or not answering): unless a person stopped it, it runs `--respect-stop restart` and posts
   whether that brought it back;
 - exit 2 (a part such as a Source reports an error) or 3 (it waits for setup): a restart does not fix these, so it only
-  posts what `status` reports.
+  posts what `status` reports; with exit 2, only the parts that also reported an error at the previous check.
 
 The same problem is posted at most once per --repeat-hours; the state file remembers what was posted. Messages name the
 parts and their details, never credentials. Exit 0 when the check ran (whatever the service's state), 1 when it could
@@ -121,6 +121,12 @@ def main():
                 text = f'**dsh-superagent（{args.profile}）停止应答，已自动重启并恢复正常。**'
             state = {}
         else:
+            errors = sorted(name for name in (report or {}).get('errors') or {} if name != 'runtime') if code == 2 else []
+            if code == 2:
+                # A Source poll can hit a one-off upstream error that its next round recovers from, so a part is posted
+                # only when it also failed at the previous check.
+                report = {**(report or {}), 'errors': {name: detail for name, detail in ((report or {}).get('errors') or {}).items()
+                                                       if name in (last.get('errors') or [])}}
             lines = problem_lines(code, report, stderr)
             posted_at = datetime.datetime.fromisoformat(last['at']) if last.get('at') else None
             same = last.get('fingerprint') == fingerprint(code, lines)
@@ -128,7 +134,12 @@ def main():
             head = {1: '服务停止应答，自动重启没有恢复', 2: '有部分报错，重启修不好，需要人处理', 3: '在等待设置，需要人处理'}[code if code in (1, 2, 3) else 1]
             text = (f'**dsh-superagent（{args.profile}）{head}**\n' + '\n'.join(lines)
                     + f'\n\n检查时间 {now.astimezone(SHANGHAI):%m-%d %H:%M}；排查见 docs/006-deployment.md 的 Troubleshooting。') if due else None
-            state = {'fingerprint': fingerprint(code, lines), 'at': (now if due else posted_at).isoformat()}
+            if not lines:
+                text = None
+                state = {key: last[key] for key in ('fingerprint', 'at') if key in last}
+            else:
+                state = {'fingerprint': fingerprint(code, lines), 'at': (now if due else posted_at).isoformat()}
+            state['errors'] = errors
         if text and args.dry_run:
             print(text)
             return 0
