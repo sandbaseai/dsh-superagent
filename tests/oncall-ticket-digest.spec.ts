@@ -181,3 +181,31 @@ it('counts the fixes oncall-fix started in the feedback window and lists those w
   expect(sent).toContain('- 需要人看：https://github.com/acme/site/pull/8')
   expect(sent).not.toContain('acme/old')
 })
+
+it('tells a fixed issue from an open one by the release time of the fix its tickets started', async () => {
+  const at = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString()
+  // The stub lark-cli appends every send to sent.md.
+  const latest = () => '**工单日报' + readFileSync(join(root, 'sent.md'), 'utf8').split('**工单日报').at(-1)
+  const fix = (minutes: number) => JSON.stringify({ b: { ticket: `bbbbbbbb${'0'.repeat(24)}`, created: at(200), stage: 'released', since: at(minutes),
+    release_tag: 'v1.2.3', repository: 'acme/site', pr_url: 'https://github.com/acme/site/pull/9' } })
+  // Released 60 minutes ago: aaaaaaaa, 30 minutes ago, came after it.
+  writeFileSync(join(root, 'fixes.json'), fix(60))
+  expect((await digest(await gateway(answer))).code).toBe(0)
+  let sent = latest()
+  expect(seen.at(-1)!.body.messages[0]!.content).toContain('"id": "bbbbbbbb",')
+  expect(seen.at(-1)!.body.messages[0]!.content).toContain('"fix_pr": "https://github.com/acme/site/pull/9"')
+  expect(sent).toMatch(/- \*\*provider-a 计费停用\*\*（2 张，供应商对接）：恢复计费（已修复：https:\/\/github\.com\/acme\/site\/pull\/9（[\d-]+ [\d:]+ 发布 v1\.2\.3），发布后仍有 1 张，可能没修好）/)
+  expect(readFileSync(join(root, 'known.md'), 'utf8')).toContain('已修复：https://github.com/acme/site/pull/9')
+  // Released 10 minutes ago: both tickets came before it, so the issue is listed as fixed, not as needing a person.
+  writeFileSync(join(root, 'fixes.json'), fix(10))
+  expect((await digest(await gateway(answer))).code).toBe(0)
+  sent = latest()
+  expect(sent).not.toContain('**需要人处理**')
+  expect(sent).toContain('**已修复**\n- provider-a 计费停用（2 张，都在发布前）：已修复：https://github.com/acme/site/pull/9')
+  // A day with no ticket of a known issue whose fix was released in the window still says it was fixed.
+  const quiet = { headline: '', issues: [{ key: 'other', title: '别的问题', cause: '', action: '', owner: '', needs_human: false,
+    ticket_ids: ['aaaaaaaa', 'cccccccc'] }] }
+  expect((await digest(await gateway(quiet))).code).toBe(0)
+  sent = latest()
+  expect(sent).toMatch(/\*\*已修复\*\*\n- provider-a 计费停用：已修复：https:\/\/github\.com\/acme\/site\/pull\/9（.*），之后没有新工单/)
+})
