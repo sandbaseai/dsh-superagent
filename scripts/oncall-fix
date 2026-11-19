@@ -29,6 +29,10 @@ config file (mode 0600):
             the workflow_dispatch workflow that takes the input `tag`. The fix Agent needs github_create_tag and
             github_dispatch_workflow, and the workflow must be allowlisted. Everything merged on main ships with the fix:
             whatever is merged there is ready to release.
+  CONSOLE_FILES  optional: owner/name:path=https://console-url,... files a person applies by hand in a console after they
+            merge, such as alert rule groups. The merging Agent reports the files the pull request changed, and the merge
+            reply asks the person to apply each listed one on its console page; when the Agent reports none, the reply
+            names every listed file of the repository.
 
 Which repositories can be changed is the Agents' GitHub authorization; this tool keeps no list. A ticket gets one fix, and
 at most three requests in all, one at a time; a design is asked for again only while none has opened a pull request.
@@ -73,6 +77,7 @@ MAX_RELEASES = 3
 CLONE = re.compile(r'^([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@(\d+)$')
 RELEASE = re.compile(r'^([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+):(\.github/workflows/[A-Za-z0-9_.-]+\.ya?ml)$')
 VERSION = re.compile(r'^v\d+\.\d+\.\d+$')
+CONSOLE_FILE = re.compile(r'^([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+):([A-Za-z0-9_./-]+)=(https://\S+)$')
 KINDS = {
     'fix': {'agent': 'FIX_AGENT_ID', 'name': '自动修复', 'pr': '修复 PR', 'who': '修复 Agent'},
     'design': {'agent': 'DEV_AGENT_ID', 'name': '设计方案', 'pr': '设计方案 PR', 'who': '开发 Agent'},
@@ -132,6 +137,12 @@ def load_config(path):
         if match[1].lower() not in values['clones']:
             raise Refused(f'RELEASES names {match[1]}, which REPOSITORIES does not list')
         values['releases'][match[1].lower()] = {'repository_id': values['clones'][match[1].lower()], 'workflow': match[2]}
+    values['console_files'] = {}
+    for entry in entries('CONSOLE_FILES'):
+        match = CONSOLE_FILE.match(entry)
+        if not match:
+            raise Refused(f'CONSOLE_FILES entry {entry!r} must be owner/name:path=https://console-url')
+        values['console_files'].setdefault(match[1].lower(), {})[match[2]] = match[3]
     return values
 
 
@@ -389,7 +400,7 @@ def advance(args, agents, fix):
             notify(args, fix, f'**已提交{kind["pr"]}**：{url}\n正在自动审阅，结果会回复在这里。')
         fix['round'] = fix.get('round', 0) + 1
         fix['review_session'] = agents.start(args.review_agent, f'oncall-review: {fix["repository"]}#{fix["pr_number"]} round {fix["round"]}',
-                                             review_task(fix, fix['round']), f'oncall-review-{tag(fix)}-r{fix["round"]}',
+                                             review_task(fix, fix['round']), f'oncall-review-{tag(fix)}-{fix["pr_number"]}-r{fix["round"]}',
                                              workspace=args.clones.get(fix['repository'].lower()))
         fix.update(stage='review', since=stamp(), review_answer=None)
         return True
@@ -435,13 +446,40 @@ def advance(args, agents, fix):
             return True
         fix.update(stage='merged', since=stamp(), merge_sha=sha)
         release = args.releases.get(fix['repository'].lower())
-        notify(args, fix, f'**已合并**：{fix["pr_url"]}' + ('\n开始发布生产，结果会回复在这里。' if release else ''))
+        notify(args, fix, f'**已合并**：{fix["pr_url"]}' + ('\n开始发布生产，结果会回复在这里。' if release else '')
+               + console_steps(fix, args.console_files.get(fix['repository'].lower()) or {}, answer))
         if release:
             start_release(args, agents, fix, release)
         return True
     if fix['stage'] == 'releasing':
         return follow_release(args, agents, fix)
     return False
+
+
+def changed_files(answer):
+    """The paths of the merge answer's closing {"changed_files": [...]}, or None when it gave none."""
+    for match in reversed(list(re.finditer(r'\{\s*"changed_files"\s*:\s*\[[^\]]*\]\s*\}', answer))):
+        try:
+            paths = json.loads(match.group(0))['changed_files']
+        except ValueError:
+            continue
+        if isinstance(paths, list) and all(isinstance(path, str) for path in paths):
+            return paths
+    return None
+
+
+def console_steps(fix, consoles, answer):
+    """The part of the merge reply that asks a person to apply the merged files they apply by hand in a console."""
+    if not consoles:
+        return ''
+    paths = changed_files(answer)
+    if paths is None:
+        lines = [f'- `{path}`：{url}' for path, url in consoles.items()]
+        head = '**没能确认这个 PR 改了哪些文件**：如果改了下面的文件，请在控制台用 main 上的文件整组替换，替换后在本话题告诉我。'
+    else:
+        lines = [f'- `{path}`：{consoles[path]}' for path in paths if path in consoles]
+        head = '**请在控制台手动替换**：用 main 上的文件整组替换下面的配置，替换后在本话题告诉我。'
+    return f'\n\n{mention(fix)}{head}\n' + '\n'.join(lines) if lines else ''
 
 
 def start_release(args, agents, fix, release):
@@ -569,7 +607,9 @@ def command_merge(args, config):
             f'Merge it now with github_merge_pull_request: the repository_id of {fix["repository"]} from github_list_repositories, '
             f'pr_number {fix["pr_number"]}, expected_head_sha {head} (the commit the review approved), idempotency_key '
             f'oncall-merge-{tag(fix)}-{fix["pr_number"]}. Merge no other pull request or head, and push nothing. If the tool refuses, '
-            'do not retry with another key or head; report its error code and reason in one short answer.'),
+            'do not retry with another key or head; report its error code and reason in one short answer. Before merging, in '
+            f'/workspace (where you pushed {head}) run git fetch origin main and git diff --name-only origin/main...{head}, and end your answer with '
+            '{"changed_files": [<those paths>]}.'),
             f'oncall-merge-{tag(fix)}-{fix["pr_number"]}-{fix.get("merge_attempts", 0) + 1}')
         fix.update(stage='merging', since=stamp(), head_sha=head, merge_attempts=fix.get('merge_attempts', 0) + 1)
         if args.by:
@@ -619,6 +659,7 @@ def command_tick(args, config):
     args.fix_agent = config['FIX_AGENT_ID']
     args.releases = config['releases']
     args.clones = config['clones']
+    args.console_files = config['console_files']
     errors = 0
     with state(args.state) as fixes:
         for fix in fixes.values():

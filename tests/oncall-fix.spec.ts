@@ -114,7 +114,7 @@ it('takes a fix through a requested change to an approved review, replying in th
   expect(stage().stage).toBe('ready')
   expect(replies()).toEqual([expect.stringMatching(/^\*\*已提交修复 PR\*\*：https:\/\/github\.com\/acme\/site\/pull\/7/),
     expect.stringMatching(/^<at user_id="ou_alice"><\/at> \*\*审阅通过，等人合并\*\*（低风险，第 2 轮）/)])
-  expect(keys).toContain(`oncall-review-${TICKET.slice(0, 16)}-r2`)
+  expect(keys).toContain(`oncall-review-${TICKET.slice(0, 16)}-7-r2`)
   // A finished fix is left alone.
   await tick()
   expect(sessions.size).toBe(3)
@@ -176,7 +176,7 @@ it('starts a design with the dev Agent after a fix opened no pull request, one r
   const entry = JSON.parse(readFileSync(join(root, 'state.json'), 'utf8'))[`${TICKET}:2`]
   expect(entry).toMatchObject({ kind: 'design', stage: 'review', pr_url: 'https://github.com/acme/site/pull/12' })
   expect(byAgent('agt_review')[0]![1].input).toContain('Kind: design')
-  expect(keys).toContain(`oncall-review-${TICKET.slice(0, 16)}-2-r1`)
+  expect(keys).toContain(`oncall-review-${TICKET.slice(0, 16)}-2-12-r1`)
   expect(replies().at(-1)).toMatch(/^\*\*已提交设计方案 PR\*\*：https:\/\/github\.com\/acme\/site\/pull\/12/)
   finish('ses_3', review('approve', '方案清楚')); await tick()
   expect(replies().at(-1)).toContain('**审阅通过，等人合并**')
@@ -306,6 +306,32 @@ it('refuses a bad REPOSITORIES or RELEASES entry, and a release of a repository 
   expect(await tick()).toMatchObject({ code: 2, stderr: expect.stringContaining('owner/name:.github/workflows/file.yaml') })
   write('RELEASES=acme/other:.github/workflows/deploy.yaml\n')
   expect(await tick()).toMatchObject({ code: 2, stderr: expect.stringContaining('which REPOSITORIES does not list') })
+  write('CONSOLE_FILES=acme/site:rules/p0.yaml=http://console.example/p0\n')
+  expect(await tick()).toMatchObject({ code: 2, stderr: expect.stringContaining('owner/name:path=https://console-url') })
+})
+
+it('asks the person who asked to merge to apply the merged files they apply by hand in a console', async () => {
+  const P0 = 'https://console.example/rules?policyId=p0', P1 = 'https://console.example/rules?policyId=p1'
+  writeFileSync(join(root, 'fix.env'), readFileSync(join(root, 'fix.env'), 'utf8') + `CONSOLE_FILES=acme/site:rules/p0.yaml=${P0}, acme/site:rules/p1.yaml=${P1}\n`, { mode: 0o600 })
+  await ready()
+  await fix('merge', '--by', 'ou_bob')
+  expect(sessions.get('ses_1')!.events.at(-1)).toContain(`git diff --name-only origin/main...${'f'.repeat(40)}`)
+  finish('ses_1', answer(`Merged #7.\n{"changed_files": ["rules/p1.yaml", "README.md"]}`), mergedBy(7)); await tick()
+  expect(replies().at(-1)).toBe(`**已合并**：https://github.com/acme/site/pull/7\n\n<at user_id="ou_bob"></at> **请在控制台手动替换**：`
+    + `用 main 上的文件整组替换下面的配置，替换后在本话题告诉我。\n- \`rules/p1.yaml\`：${P1}`)
+
+  // No listed file changed: only the merge is replied.
+  rmSync(join(root, 'state.json'))
+  await ready(); await fix('merge')
+  finish(stage().fix_session, answer('Merged #7.\n{"changed_files": ["README.md"]}'), mergedBy(7)); await tick()
+  expect(replies().at(-1)).toBe('**已合并**：https://github.com/acme/site/pull/7')
+
+  // The Agent reported no files: every listed file is named.
+  rmSync(join(root, 'state.json'))
+  await ready(); await fix('merge')
+  finish(stage().fix_session, answer('Merged #7.'), mergedBy(7)); await tick()
+  expect(replies().at(-1)).toContain('**没能确认这个 PR 改了哪些文件**')
+  expect(replies().at(-1)).toContain(`- \`rules/p0.yaml\`：${P0}\n- \`rules/p1.yaml\`：${P1}`)
 })
 
 it('refuses a request for a repository REPOSITORIES does not list, before starting a Session', async () => {
