@@ -50,7 +50,9 @@ Answer with one JSON object and nothing else:
 
 Put every ticket in exactly one issue. needs_human is true only when a person has to fix or decide something (a real
 fault, a broken page, a quota, a config); a false alarm that only needs a rule change is needs_human false with owner
-告警规则. Use only what the conclusions say; do not invent causes.
+告警规则. A ticket with fix_pr asked for that pull request to fix its problem, and its conclusion may only talk about the
+fix, merge or release: group it with the problem its title and the other tickets show, never as an issue about the pull
+request. Use only what the conclusions say; do not invent causes.
 
 Known issues:
 {known}
@@ -103,7 +105,7 @@ def read_tickets(url, since):
             for ticket in items:
                 at = parse_time(ticket['createdAt'])
                 if at >= since:
-                    tickets.append({'id': ticket['id'][:8], 'ref': ticket['id'], 'at': at.astimezone(SHANGHAI).strftime('%m-%d %H:%M'),
+                    tickets.append({'id': ticket['id'][:8], 'ref': ticket['id'], 'created': at, 'at': at.astimezone(SHANGHAI).strftime('%m-%d %H:%M'),
                                     'title': ticket['title'][:160],
                                     'outcome': (ticket.get('ended') or {}).get('outcome', 'open'),
                                     'conclusion': conclusion(ticket.get('summary', ''))})
@@ -176,12 +178,41 @@ def feedback_markdown(tickets, counts, hours):
     return lines + ['']
 
 
-def fix_markdown(path, hours, now):
-    """The digest's line on oncall-fix: fixes started in the window by how far they got, or nothing without fixes."""
+def read_fixes(path):
     try:
-        fixes = list(json.loads(path.read_text()).values()) if path.exists() else []
+        return list(json.loads(path.read_text()).values()) if path.exists() else []
     except (OSError, ValueError):
         return []
+
+
+def fix_of(fixes, ticket_ids):
+    """The latest fix oncall-fix started from one of these tickets, or None."""
+    found = [fix for fix in fixes if str(fix.get('ticket', ''))[:8] in ticket_ids and fix.get('created')]
+    return max(found, key=lambda fix: fix['created']) if found else None
+
+
+def fix_note(fix, after=None):
+    """How far the fix of an issue got, in one Chinese phrase; `after` counts the issue's tickets since its release."""
+    link = fix.get('pr_url') or fix.get('repository', '')
+    stage = fix.get('stage')
+    if stage == 'released':
+        when = parse_time(fix['since']).astimezone(SHANGHAI).strftime('%m-%d %H:%M') if fix.get('since') else '?'
+        tag = f' {fix["release_tag"]}' if fix.get('release_tag') else ''
+        note = f'已修复：{link}（{when} 发布{tag}）'
+        if after is None:
+            return note
+        return note + (f'，发布后仍有 {after} 张，可能没修好' if after else '，发布后没有新工单')
+    if stage == 'merged':
+        return f'修复已合并、还没发布：{link}'
+    if stage == 'ready':
+        return f'修复 PR 等人合并：{link}'
+    if stage in ('no_pr', 'failed', 'needs_human', 'release_failed'):
+        return f'修复没成功（{stage}）：{link}'
+    return f'修复进行中：{link}'
+
+
+def fix_markdown(fixes, hours, now):
+    """The digest's line on oncall-fix: fixes started in the window by how far they got, or nothing without fixes."""
     recent = [fix for fix in fixes if now - parse_time(fix['created']) <= datetime.timedelta(hours=hours)]
     if not recent:
         return []
@@ -237,8 +268,10 @@ def parse_answer(text, ticket_ids):
     return issues, str(answer.get('headline', ''))[:300]
 
 
-def merge(known, issues, now):
-    """The known list after today's issues: matched ones updated, new ones added, quiet ones marked, old quiet ones dropped."""
+def merge(known, issues, now, fixes=()):
+    """The known list after today's issues: matched ones updated, new ones added, quiet ones marked, old quiet ones dropped.
+
+    An issue keeps the ticket its latest fix started from, so later days show how that fix went."""
     by_key = {issue['key']: dict(issue) for issue in known}
     stamp = now.isoformat(timespec='seconds')
     for issue in issues:
@@ -249,6 +282,9 @@ def merge(known, issues, now):
         entry['tickets'] = entry.get('tickets', 0) + len(issue['ticket_ids'])
         entry['lastSeen'] = stamp
         entry['status'] = 'open'
+        fix = fix_of(fixes, issue['ticket_ids'])
+        if fix:
+            entry['fix_ticket'] = fix['ticket'][:8]
         by_key[issue['key']] = entry
     kept = []
     for entry in by_key.values():
@@ -261,7 +297,7 @@ def merge(known, issues, now):
     return sorted(kept, key=lambda entry: (entry['status'] != 'open', not entry.get('needs_human'), entry.get('lastSeen', '')), reverse=False)
 
 
-def known_markdown(known, now):
+def known_markdown(known, now, fixes=()):
     """The list workers read: one line per open issue with its cause, since when, and what to check before re-investigating."""
     lines = [f'# 已知问题（更新于 {now.astimezone(SHANGHAI):%m-%d %H:%M} 北京时间）', '',
              '新告警先对照这里：如果是同一个问题，先用一两条查询确认它还是同一原因、有没有新变化，再在回复里写明「已知问题：<标题>，自 <首次> 起」，'
@@ -270,24 +306,56 @@ def known_markdown(known, now):
         first = parse_time(entry['firstSeen']).astimezone(SHANGHAI).strftime('%m-%d %H:%M')
         last = parse_time(entry['lastSeen']).astimezone(SHANGHAI).strftime('%m-%d %H:%M')
         tag = '安静' if entry['status'] == 'quiet' else ('需要人处理' if entry.get('needs_human') else '无需处理')
-        lines.append(f'- **{entry["title"]}**（`{entry["key"]}`，{tag}，{entry.get("tickets", 0)} 张工单，首次 {first}，最近 {last}）：{entry["cause"]} 建议：{entry["action"]}')  # noqa: E501
+        fix = fix_of(fixes, {entry['fix_ticket']}) if entry.get('fix_ticket') else None
+        lines.append(f'- **{entry["title"]}**（`{entry["key"]}`，{tag}，{entry.get("tickets", 0)} 张工单，首次 {first}，最近 {last}）：{entry["cause"]} 建议：{entry["action"]}'  # noqa: E501
+                     + (f' {fix_note(fix)}。' if fix else ''))
     return '\n'.join(lines) + '\n'
 
 
-def digest_markdown(issues, headline, hours, total, now, feedback_lines=()):
+def digest_markdown(issues, headline, hours, total, now, feedback_lines=(), known=(), fixes=(), tickets=()):
+    """The digest. An issue whose fix was released and has no ticket since is listed under 已修复, as is a known issue
+    whose fix was released in the window and that had no ticket in it, so a fixed problem is not read as unhandled."""
     stamp = now.astimezone(SHANGHAI).strftime('%m-%d %H:%M')
-    human = [issue for issue in issues if issue['needs_human']]
-    rest = [issue for issue in issues if not issue['needs_human']]
+    created = {ticket['id']: ticket['created'] for ticket in tickets}
+    by_key = {entry['key']: entry for entry in known}
+    notes, fixed = {}, []
+    for issue in issues:
+        entry = by_key.get(issue['key'], {})
+        fix = fix_of(fixes, {entry['fix_ticket']}) if entry.get('fix_ticket') else None
+        if not fix:
+            continue
+        after = None
+        if fix.get('stage') == 'released' and fix.get('since'):
+            after = sum(1 for ticket_id in issue['ticket_ids'] if ticket_id in created and created[ticket_id] > parse_time(fix['since']))
+        notes[issue['key']] = fix_note(fix, after)
+        if after == 0:
+            fixed.append(issue)
+    open_issues = [issue for issue in issues if issue not in fixed]
+    human = [issue for issue in open_issues if issue['needs_human']]
+    rest = [issue for issue in open_issues if not issue['needs_human']]
+    note = lambda issue: f'（{notes[issue["key"]]}）' if issue['key'] in notes else ''
     lines = [f'**工单日报 {stamp}**（过去 {hours} 小时，{total} 张工单，归为 {len(issues)} 类）', headline, '']
     if human:
         lines.append('**需要人处理**')
-        lines += [f'- **{issue["title"]}**（{len(issue["ticket_ids"])} 张，{issue["owner"] or "待定"}）：{issue["action"]}' for issue in human]
+        lines += [f'- **{issue["title"]}**（{len(issue["ticket_ids"])} 张，{issue["owner"] or "待定"}）：{issue["action"]}{note(issue)}' for issue in human]
         lines.append('')
     if rest:
         lines.append('**无需处理**')
         lines += [f'- {issue["title"]}（{len(issue["ticket_ids"])} 张）' + (f'：{issue["action"]}' if issue['action'] and issue['action'] != '无需处理' else '')
-                  for issue in rest]
-    lines.append('')
+                  + note(issue) for issue in rest]
+        lines.append('')
+    seen = {issue['key'] for issue in issues}
+    window = datetime.timedelta(hours=hours)
+    quiet_fixed = []
+    for entry in known:
+        fix = fix_of(fixes, {entry['fix_ticket']}) if entry.get('fix_ticket') and entry['key'] not in seen else None
+        if fix and fix.get('stage') == 'released' and fix.get('since') and now - parse_time(fix['since']) <= window:
+            quiet_fixed.append(f'- {entry["title"]}：{fix_note(fix)}，之后没有新工单')
+    if fixed or quiet_fixed:
+        lines.append('**已修复**')
+        lines += [f'- {issue["title"]}（{len(issue["ticket_ids"])} 张，都在发布前）：{notes[issue["key"]]}' for issue in fixed]
+        lines += quiet_fixed
+        lines.append('')
     lines += list(feedback_lines)
     lines.append('想看某一类的工单，在群里 @ 值班机器人问；分析有用或不对，在那条回复上点 👍 或 👎。')
     return '\n'.join(lines)
@@ -337,14 +405,17 @@ def main():
     try:
         tickets = read_tickets(args.url, now - datetime.timedelta(hours=args.hours))
         known = json.loads(args.known.read_text()) if args.known.exists() else []
+        fixes = read_fixes(args.fix_state)
         if tickets:
-            shown = [{k: v for k, v in ticket.items() if k != 'ref'} for ticket in tickets]
+            fixed_by = {str(fix.get('ticket', ''))[:8]: fix['pr_url'] for fix in sorted(fixes, key=lambda fix: fix.get('created', '')) if fix.get('pr_url')}
+            shown = [{k: v for k, v in ticket.items() if k not in ('ref', 'created')} | ({'fix_pr': fixed_by[ticket['id']]} if ticket['id'] in fixed_by else {})
+                     for ticket in tickets]
             prompt = PROMPT.format(hours=args.hours, known=json.dumps([{k: entry.get(k) for k in ('key', 'title', 'cause', 'status')} for entry in known],
                                                                          ensure_ascii=False), tickets=json.dumps(shown, ensure_ascii=False, indent=0))
             issues, headline = parse_answer(ask(args.base_url, api_key(args.credentials, args.key_ref), args.model, prompt), [t['id'] for t in tickets])
         else:
             issues, headline = [], f'过去 {args.hours} 小时没有工单。'
-        known = merge(known, issues, now)
+        known = merge(known, issues, now, fixes)
         lines = []
         if args.feedback_hours:
             marked = read_tickets(args.url, now - datetime.timedelta(hours=args.feedback_hours))
@@ -354,15 +425,15 @@ def main():
                 print(f'oncall-ticket-digest: feedback not read: {error}', file=sys.stderr)
                 counts = None
             lines = feedback_markdown(marked, counts, args.feedback_hours)
-        lines = fix_markdown(args.fix_state, args.feedback_hours or 48, now) + lines
-        text = digest_markdown(issues, headline, args.hours, len(tickets), now, lines)
+        lines = fix_markdown(fixes, args.feedback_hours or 48, now) + lines
+        text = digest_markdown(issues, headline, args.hours, len(tickets), now, lines, known, fixes, tickets)
         if args.dry_run:
             print(text)
-            print('\n---\n' + known_markdown(known, now))
+            print('\n---\n' + known_markdown(known, now, fixes))
             return 0
         args.known.parent.mkdir(parents=True, exist_ok=True)
         args.known.write_text(json.dumps(known, ensure_ascii=False, indent=1) + '\n')
-        args.known.with_suffix('.md').write_text(known_markdown(known, now))
+        args.known.with_suffix('.md').write_text(known_markdown(known, now, fixes))
         post(args.lark_cli, args.chat, text)
     except (RuntimeError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as error:
         print(f'oncall-ticket-digest: {error}', file=sys.stderr)
