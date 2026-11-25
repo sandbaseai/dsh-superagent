@@ -1,6 +1,7 @@
 /**
  * Repeat notices: a firing alarm that a ticket on its alert Thread already analysed gets a short reply instead of silence,
- * naming the earlier conclusion and linking the analysis, at most once per `repeatNoticeMinutes` on the Thread.
+ * naming the earlier conclusion and linking the analysis, at most once per `repeatNoticeMinutes` on the Thread. Every such
+ * alarm, answered or not, also gets a ✅ reaction, so each card in the chat shows it was handled.
  */
 import { key, latestReport, threadKey, type Ticket, type Trigger } from '../core/index.ts'
 import { isAlertThread, type FeishuAlert } from './feishu-alert.ts'
@@ -12,6 +13,8 @@ import type { FeishuConfig } from './feishu.ts'
 import { IM_WORDS, wordCount, wordPrefix } from '../infra/text.ts'
 
 const CONCLUSION_CHARS = 160
+/** Feishu's ✅ emoji, put on a repeat that the earlier analysis covers. */
+const HANDLED = 'DONE'
 
 /** The text of the `结论` (or `Conclusion`) part of a report's reply, up to the next bold label, cut to CONCLUSION_CHARS. */
 export function conclusionOf(summary: string): string | undefined {
@@ -42,6 +45,10 @@ export async function repeatNotice(ctx: SourceContext, trigger: Trigger, config:
   if (!config.repeatNoticeMinutes || alert?.status !== 'firing' || !trigger.channel) return
   const earlier = analysedBy(ctx, trigger, config.repeatWindowHours * 3600_000)
   if (!earlier) return
+  const own = feishuRef(trigger)
+  // Best effort: a missing reaction only leaves the card as it was.
+  if (own) await ctx.commands.withSignal(signal).lark(['api', 'POST', `/open-apis/im/v1/messages/${own.messageId}/reactions`,
+    '--data', JSON.stringify({ reaction_type: { emoji_type: HANDLED } })]).catch(() => undefined)
   const ref = trigger.threads.find(thread => isAlertThread(thread.id))!
   const sentKey = KV.feishu.repeatNotice(threadKey(ref))
   const last = ctx.state.get(sentKey)

@@ -55,7 +55,7 @@ export const feishuKind: SourceKind<FeishuConfig> = {
       hint: { zh: '机器人已加入、但没列在上面的群。“仅 @”接收那里 @ 机器人的消息；谁的消息能发起工作看策略里的准入。', en: 'Chats the bot has joined that are not listed above. "@ only" receives messages there that mention the bot; whose messages may originate work is the Policy\'s admission.' } },
     { key: 'directMessages', type: 'switch', label: { zh: '接收私聊', en: 'Direct messages' } },
     { key: 'repeatNoticeMinutes', type: 'number', advanced: true, min: 0, max: 1440, label: { zh: '重复告警的提示间隔 / 分钟', en: 'Repeat alarm notice interval / min' },
-      hint: { zh: '一条告警已有工单分析过、又再次触发时，回复它一条短消息，附上之前的结论和分析链接；同一告警在这段时间内最多回一条。0 表示不回。', en: 'When an alarm a ticket already analysed fires again, reply to it with the earlier conclusion and a link to the analysis, at most once in this many minutes per alarm. 0 sends none.' } },
+      hint: { zh: '一条告警已有工单分析过、又再次触发时，回复它一条短消息，附上之前的结论和分析链接；同一告警在这段时间内最多回一条，其余的只加一个 ✅ 表情。0 表示不回也不加。', en: 'When an alarm a ticket already analysed fires again, reply to it with the earlier conclusion and a link to the analysis, at most once in this many minutes per alarm, and put a ✅ reaction on every such repeat. 0 sends neither.' } },
     { key: 'repeatWindowHours', type: 'number', advanced: true, min: 1, max: 48, label: { zh: '重复告警的判断时长 / 小时', en: 'Repeat alarm window / h' },
       hint: { zh: '工单建立后多久内，同一告警再次触发算作重复；应与评估规则里的重复时长一致。', en: 'How long after a ticket starts a new firing of its alarm counts as a repeat; keep it equal to the repeat window in the Eval rules.' } },
     { key: 'sameRuleHours', type: 'number', advanced: true, min: 0, max: 168, label: { zh: '同一告警规则的回看时长 / 小时', en: 'Same alarm rule lookback / h' },

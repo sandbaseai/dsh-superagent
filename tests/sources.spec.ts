@@ -249,6 +249,10 @@ describe('feishu source', () => {
     const late = alarm(qpsOngoing, start + 7 * 3600_000)
     await repeatNotice(h, late, config)
     expect([soon, recovered, first, late].map(notice)).toEqual([undefined, undefined, undefined, undefined])
+    // Every repeat the analysis covers gets a ✅, the answered one and the one within the interval; the others get none.
+    const reacted = lark.mock.calls.flatMap(([args]) => args[0] === 'api' && args[1] === 'POST' ? [args[2]] : [])
+    expect(reacted).toEqual([again, soon].map(trigger => `/open-apis/im/v1/messages/${trigger.meta.messageId}/reactions`))
+    expect(lark).toHaveBeenCalledWith(expect.arrayContaining(['--data', '{"reaction_type":{"emoji_type":"DONE"}}']))
     // After the interval it answers again; without a link it names the time alone, and the setting at 0 sends nothing.
     lark.mockRejectedValue(new Error('offline'))
     const later = alarm(qpsOngoing, start + 45 * 60_000)
