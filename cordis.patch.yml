@@ -181,8 +181,14 @@
               compaction: true
               toolResultPruner: true
             config:
+              # The main Session's state is in the store, so it needs little history verbatim. With the default trigger (197k
+              # tokens on a 262k window) and a 16 % tail it ran at a median of 173k tokens a step. Its system prompt, tools
+              # and summary hold about 44k, so a 118k trigger with a 20k tail leaves room for about 20 steps between them.
               - id: compaction-basic
                 name: '@deepseek-ai/dsh-compaction-basic'
+                config:
+                  thresholdRatio: 0.45
+                  retainTokens: 20000
               - id: command-compact
                 name: '@deepseek-ai/dsh-command-compact'
               - id: tool-result-pruner
