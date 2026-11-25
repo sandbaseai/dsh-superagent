@@ -94,6 +94,20 @@ export function screenAlert(trigger: Trigger, tickets: Ticket[]): string | undef
   if (alert.status === 'recovered') return 'alert_recovered'
   return tickets.some(liveTicket) ? 'alert_repeat' : undefined
 }
+/**
+ * Tickets among `tickets` that a firing alarm's rule started within `hours` before it, on any object of the rule, newest
+ * first: a known cause the alarm may share.
+ */
+export function sameRuleTickets(trigger: Trigger, tickets: Ticket[], hours: number): Ticket[] {
+  const alert = trigger.meta.alert as Partial<FeishuAlert> | undefined
+  if (!hours || alert?.status !== 'firing' || !alert.policy) return []
+  const at = Date.parse(trigger.at)
+  return tickets.filter(ticket => {
+    const started = (ticket.mandate.basis.scope as { alert?: Partial<FeishuAlert> } | undefined)?.alert
+    const age = at - Date.parse(ticket.createdAt)
+    return started?.policy === alert.policy && age >= 0 && age < hours * 3600_000
+  }).sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+}
 /** The id of a chat's alert Thread for `key`, under the Feishu Source. */
 export const alertThreadId = (chatId: string, key: string): string => `${chatId}:alert:${key}`
 export const isAlertThread = (id: string): boolean => id.includes(':alert:')

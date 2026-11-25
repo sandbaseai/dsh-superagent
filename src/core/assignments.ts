@@ -94,7 +94,7 @@ export class Assignments extends EnginePart {
    * Records a worker status report on an open ticket's current assignment, updating `attention`, `answers`, held automated
    * inputs, and ending the ticket when `dropped` or when `ready` and not waiting on followed threads (`followsDone`).
    * @throws UserError for an unknown or ended ticket, an ended assignment, a question combined with a ready result or answer,
-   * or a question/answer referencing a non-human or unreached trigger.
+   * or a question/answer referencing a trigger that is neither a person's message it reached nor an automated one attached to it.
    */
   report(ticketId: string, report: WorkerReport): Ticket {
     const ticket = this.require(ticketId)
@@ -106,7 +106,13 @@ export class Assignments extends EnginePart {
       return !!trigger?.human && (!channel || !!trigger.channel) && this.reaches(ticket, trigger, false)
     }
     if (report.askedBy && !person(report.askedBy, true)) throw new UserError('notAsker')
-    if (report.answers && !person(report.answers, false)) throw new UserError('notAnswerable')
+    // An automated message attached from another conversation, such as an alarm of a known cause, is answered where it was posted.
+    const attached = (id: string) => {
+      const trigger = this.repo.triggers.get(id)
+      return !!trigger && !trigger.human && !!trigger.channel && !ticket.origin.triggerIds.includes(id)
+        && ticket.inputs.some(input => input.kind === 'trigger' && input.triggerId === id && !input.context)
+    }
+    if (report.answers && !person(report.answers, false) && !attached(report.answers)) throw new UserError('notAnswerable')
     const assignment = runningAssignment(ticket) ?? latestAssignment(ticket)
     if (!assignment) throw new UserError('unknownAssignment')
     if (assignment.state === 'ended') throw new UserError('assignmentEnded')

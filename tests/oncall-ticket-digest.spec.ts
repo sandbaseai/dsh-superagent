@@ -34,6 +34,15 @@ beforeEach(async () => {
       response.writeHead(200, { 'content-type': 'application/json' })
       response.end(JSON.stringify({ setup: { accounts: { feishu: { appId: 'cli_ours' } } } })); return
     }
+    if (url.pathname.endsWith('/decisions')) {
+      const items = [{ thread: 'feishu:oc_alerts:alert:k1', reason: [{ code: 'routed', values: { ticket: 'aaaaaaaa' } }] },
+        { thread: 'feishu:oc_alerts:alert:k2', reason: [{ code: 'said', values: { text: 'repeat' } }] },
+        { thread: 'feishu:oc_alerts:om_x', reason: [{ code: 'routed', values: { ticket: 'aaaaaaaa' } }] },
+        { thread: 'feishu:oc_alerts:alert:k3', reason: [{ code: 'routed', values: { ticket: 'bbbbbbbb' } }] }]
+      const offset = Number(url.searchParams.get('offset'))
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ items: items.slice(offset, offset + 2), next_offset: offset + 2 < items.length ? offset + 2 : null })); return
+    }
     const detail = /\/tickets\/(\w+)$/.exec(url.pathname)
     if (detail) {
       response.writeHead(200, { 'content-type': 'application/json' })
@@ -117,6 +126,8 @@ it('groups the window\'s tickets through the gateway, posts the digest and write
   expect(sent).toContain('**需要人处理**\n- **provider-a 计费停用**（2 张，供应商对接）：恢复计费')
   // A ticket the model left out is listed under 未归类; an issue with no ticket of the window is dropped.
   expect(sent).toContain('未归类（1 张）')
+  // Alarms attached to an existing ticket, across pages, count; a repeat or a person's message does not.
+  expect(sent).toContain('**告警归并**：过去 24 小时 2 条告警挂到已有工单复核，没有新开工单。')
   expect(sent).not.toContain('旧链接 404')
   const known = JSON.parse(readFileSync(join(root, 'known.json'), 'utf8'))
   expect(known).toEqual([expect.objectContaining({ key: 'provider-a-billing', tickets: 2, status: 'open', needs_human: true })])

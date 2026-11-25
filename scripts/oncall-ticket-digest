@@ -130,6 +130,17 @@ def lark_get(lark, path, params=None):
     return answer.get('data') or {}
 
 
+def attached_alarms(url):
+    """How many alarms of the last 24 hours the main Session attached to an existing ticket instead of opening one."""
+    count, offset = 0, 0
+    while offset is not None:
+        listed = management(url, f'decisions?kind=ignore&window=24h&offset={offset}&limit={PAGE}')
+        count += sum(1 for item in listed.get('items') or [] if ':alert:' in str(item.get('thread', ''))
+                     and any(reason.get('code') == 'routed' for reason in item.get('reason') or []))
+        offset = listed.get('next_offset')
+    return count
+
+
 def ticket_feedback(url, lark, app_id, ticket):
     """`(up, down)`: people's 👍 and 👎 on the bot's replies in the topic of the ticket's Feishu message."""
     page = management(url, f'tickets/{ticket["ref"]}')
@@ -426,6 +437,10 @@ def main():
                 counts = None
             lines = feedback_markdown(marked, counts, args.feedback_hours)
         lines = fix_markdown(fixes, args.feedback_hours or 48, now) + lines
+        if args.hours == 24:
+            attached = attached_alarms(args.url)
+            if attached:
+                lines = [f'**告警归并**：过去 24 小时 {attached} 条告警挂到已有工单复核，没有新开工单。', ''] + lines
         text = digest_markdown(issues, headline, args.hours, len(tickets), now, lines, known, fixes, tickets)
         if args.dry_run:
             print(text)

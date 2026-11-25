@@ -11,6 +11,7 @@
     "directMessages": false,
     "otherChats": "none",
     "repeatNoticeMinutes": 30,
-    "repeatWindowHours": 6
+    "repeatWindowHours": 6,
+    "sameRuleHours": 72
   }
 }

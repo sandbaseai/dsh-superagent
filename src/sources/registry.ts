@@ -137,6 +137,13 @@ export class SourceRegistry implements SourceScope {
     const instance = this.resolve(kind, settings.sources[kind.kind])
     return instance.enabled ? kind.screen(trigger, tickets, instance.config) : undefined
   }
+  /** See `SourceScope.kin`; nothing for an uninstalled or disabled kind. */
+  kin(trigger: Trigger, tickets: Ticket[], settings = this.settings()): Ticket[] {
+    const kind = this.kinds.get(trigger.source)
+    if (!kind?.kin) return []
+    const instance = this.resolve(kind, settings.sources[kind.kind])
+    return instance.enabled ? kind.kin(trigger, tickets, instance.config) : []
+  }
   /** Falls back to schema defaults and disables the instance when stored configuration fails validation. */
   private resolve(kind: SourceKind, stored: { enabled: boolean; config: Record<string, unknown> } | undefined): SourceInstance {
     const parsed = kind.schema.safeParse(stored?.config ?? {})

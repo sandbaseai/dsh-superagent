@@ -13,6 +13,8 @@ export interface SourceScope {
   scope(input: { source: string; meta: Record<string, unknown> }): ScopeResult
   /** The reason code when the Trigger's Source sets a listed bot's message aside before assessment, given the Tickets on its Thread. */
   screen?(trigger: Trigger, tickets: Ticket[]): string | undefined
+  /** Tickets among `tickets` that the Trigger's Source says report the same kind of event, such as an alarm of the same rule, newest first. */
+  kin?(trigger: Trigger, tickets: Ticket[]): Ticket[]
 }
 
 /** Versioned rules; `gate` decides who may originate work. Source scope is not part of Policy. */
@@ -46,6 +48,12 @@ export interface Candidate {
    * person stopped: candidates for attaching a Trigger that reports the same incident, such as alerts that fire together.
    */
   nearby?: Ticket[]
+  /**
+   * Tickets on other Threads that the Source says report the same kind of event as the newest Trigger, such as an alarm of
+   * the same rule on another object or hours later, at most three, leaving out those a person stopped and those in `nearby`:
+   * candidates for attaching a Trigger whose cause is a known one.
+   */
+  kin?: Ticket[]
 }
 
 /** Why an explicit request may be ignored without a reply: it repeats one, it was answered already, or it is chat. */
