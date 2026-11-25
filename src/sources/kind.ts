@@ -102,6 +102,8 @@ export interface SourceKind<C extends Record<string, unknown> = Record<string, u
    * `tickets` are the Tickets on the Trigger's primary Thread. Kinds without `screen` set nothing aside.
    */
   screen?(trigger: Trigger, tickets: Ticket[], config: C): string | undefined
+  /** Tickets among `tickets` reporting the same kind of event as the Trigger, newest first; kinds without `kin` name none. */
+  kin?(trigger: Trigger, tickets: Ticket[], config: C): Ticket[]
   /** Outbound reply adapter; kinds without `channel` produce no replies or channel checks. */
   channel?: SourceChannel<C>
   /** Bounded context reader for assessments; assessments of a kind without `threadContext` read none. */

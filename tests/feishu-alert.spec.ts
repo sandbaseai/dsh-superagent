@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest'
 import { feishuTrigger, historyEvent, parseAlert, type FeishuAlert } from '../src/sources/feishu.ts'
 import { historyText, type HistoricalMessage } from '../src/sources/feishu-trigger.ts'
-import { looksLikeAlert, screenAlert } from '../src/sources/feishu-alert.ts'
+import { looksLikeAlert, sameRuleTickets, screenAlert } from '../src/sources/feishu-alert.ts'
 import { countAlert, UNPARSED_ALERTS } from '../src/sources/feishu-loops.ts'
 import type { Health, SourceContext } from '../src/sources/host.ts'
 import type { Ticket } from '../src/core/index.ts'
@@ -102,6 +102,28 @@ describe('screenAlert', () => {
     expect(screenAlert(notice('firing'), [{ id: 'done', ended: { at: '', by: 'executor', reason: 'x', outcome: 'completed' } } as Ticket]))
       .toBeUndefined()
     expect(screenAlert({ ...notice('firing'), meta: {} }, [{ id: 'live' } as Ticket])).toBeUndefined()
+  })
+})
+
+describe('sameRuleTickets', () => {
+  const at = '2026-11-25T12:00:00.000Z'
+  const firing = { ...trigger(qpsFiring), at, meta: { alert: { status: 'firing', policy: 'p1/LatencyHigh', key: 'k1' } } }
+  const started = (id: string, policy: string, hoursAgo: number) => ({ id, createdAt: new Date(Date.parse(at) - hoursAgo * 3600_000).toISOString(),
+    mandate: { basis: { scope: { alert: { policy } } } } }) as unknown as Ticket
+  it('puts the tickets whose object shares the alarm\'s provider or model first, then the newest', () => {
+    const alarm = { ...firing, meta: { alert: { ...firing.meta.alert, object: '供应商 xxcapi-vip 失败率过高' } } }
+    const on = (id: string, object: string, hoursAgo: number) => ({ ...started(id, 'p1/LatencyHigh', hoursAgo),
+      mandate: { basis: { scope: { alert: { policy: 'p1/LatencyHigh', object } } } } }) as unknown as Ticket
+    const tickets = [on('other-new', '供应商 tikhub 失败率过高', 1), on('same-old', '供应商 xxcapi-vip 失败率过高', 40), on('other-old', '供应商 treg 失败率过高', 3)]
+    expect(sameRuleTickets(alarm, tickets, 72).map(ticket => ticket.id)).toEqual(['same-old', 'other-new', 'other-old'])
+  })
+  it('names the tickets the firing alarm\'s rule started within the window, newest first, and none for a recovery or a zero window', () => {
+    const tickets = [started('old', 'p1/LatencyHigh', 80), started('a', 'p1/LatencyHigh', 50), started('b', 'p1/LatencyHigh', 2),
+      started('other', 'p1/Other', 1), started('later', 'p1/LatencyHigh', -1), { id: 'person', createdAt: at, mandate: { basis: {} } } as unknown as Ticket]
+    expect(sameRuleTickets(firing, tickets, 72).map(ticket => ticket.id)).toEqual(['b', 'a'])
+    expect(sameRuleTickets(firing, tickets, 0)).toEqual([])
+    expect(sameRuleTickets({ ...firing, meta: { alert: { status: 'recovered', policy: 'p1/LatencyHigh' } } }, tickets, 72)).toEqual([])
+    expect(sameRuleTickets({ ...firing, meta: {} }, tickets, 72)).toEqual([])
   })
 })
 

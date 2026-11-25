@@ -75,7 +75,8 @@ export class Replies extends EnginePart {
     const attention = request.purpose === 'attention' ? ticket?.attention : undefined
     // Attention replies must match the ticket's currently open question text.
     if (request.purpose === 'attention' && (!attention || attention.question !== request.question)) throw new UserError('notAttention')
-    if (request.purpose === 'answer' && !trigger?.human) throw new UserError('notQuestion')
+    // An automated message is answered only when the worker reported the answer to it, as for an alarm attached to the ticket.
+    if (request.purpose === 'answer' && !trigger?.human && !(trigger && ticket?.answers?.includes(trigger.id))) throw new UserError('notQuestion')
     const id = attention ? key('attention-reply', attention.id) : key('reply', trigger?.id ?? ticket?.id ?? '', request.text)
     const existing = this.options.outbox.status(id)
     const ready = !ticket || !trigger || ticket.answers?.includes(trigger.id)

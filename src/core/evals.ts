@@ -2,7 +2,7 @@
 import { key } from './ids.ts'
 import { UserError } from './errors.ts'
 import { liveTicket, threadKey } from './model.ts'
-import type { Decision, DecisionKind, Evaluation, Mandate, MandateBasis, Strength, Thread, Trigger } from './model.ts'
+import type { Decision, DecisionKind, Evaluation, Mandate, MandateBasis, Strength, Thread, Ticket, Trigger } from './model.ts'
 import type { AssessmentOutcome, Candidate, Policy } from './ports.ts'
 import { said, type Reason } from './reasons.ts'
 import { EnginePart, type EngineOptions } from './part.ts'
@@ -24,6 +24,7 @@ export const ACCEPT_RECALL_MS = 6 * 3600_000
 /** How far back a candidate's nearby Tickets on other Threads reach when the Policy does not say, and how many it carries. */
 export const NEARBY_MS = 30 * 60_000
 const NEARBY_TICKETS = 5
+const KIN_TICKETS = 3
 /**
  * A Thread's Decisions an assessor sees, oldest first: the latest few, plus the newest accept or observe-mode would-accept
  * within `ACCEPT_RECALL_MS` when later ignores pushed it out. In observe mode that would-accept is the only record that
@@ -266,8 +267,17 @@ export class Evals extends EnginePart {
     const triggers = evaluation.triggerIds.flatMap(id => { const trigger = this.repo.triggers.get(id); return trigger ? [trigger] : [] })
     const { id: evalId, strength, policyVersion } = evaluation
     const nearby = this.nearby(thread)
+    const kin = this.kin(thread, triggers.at(-1), nearby)
     return { evalId, thread, triggers, strength, policyVersion, tickets: this.ticketsOnThread(thread),
-      decisions: recentDecisions(this.repo.decisions.byThread(thread.key), this.now()), ...nearby.length ? { nearby } : {} }
+      decisions: recentDecisions(this.repo.decisions.byThread(thread.key), this.now()), ...nearby.length ? { nearby } : {},
+      ...kin.length ? { kin } : {} }
+  }
+  /** See `Candidate.kin`. */
+  private kin(thread: Thread, trigger: Trigger | undefined, nearby: Ticket[]): Ticket[] {
+    if (!trigger || !this.options.scope.kin) return []
+    const others = this.repo.tickets.list().filter(ticket => ticket.ended?.by !== 'human' && !thread.subscriptions.includes(ticket.id)
+      && !nearby.some(item => item.id === ticket.id))
+    return this.options.scope.kin(trigger, others).slice(0, KIN_TICKETS)
   }
   /** See `Candidate.nearby`. */
   private nearby(thread: Thread) {

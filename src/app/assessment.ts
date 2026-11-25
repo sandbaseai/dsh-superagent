@@ -228,6 +228,8 @@ export class MasterAssessor implements Assessor {
       ...relatedTickets(candidate.tickets), ...threadDecisions(candidate.decisions), policy_version: candidate.policyVersion,
       // Tickets on other Threads of this Source from the last half hour, which a Trigger reporting the same incident may attach to.
       ...candidate.nearby?.length ? { nearby_tickets: candidate.nearby.map(ticket => ({ ...ticketCard(ticket), created_at: ticket.createdAt })) } : {},
+      // Tickets the Source says report the same kind of event, such as the same alert rule, which a Trigger with a known cause may attach to.
+      ...candidate.kin?.length ? { same_rule_tickets: candidate.kin.map(ticket => ({ ...ticketCard(ticket), created_at: ticket.createdAt })) } : {},
       thread }
   }
   /**

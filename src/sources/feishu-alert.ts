@@ -94,6 +94,28 @@ export function screenAlert(trigger: Trigger, tickets: Ticket[]): string | undef
   if (alert.status === 'recovered') return 'alert_recovered'
   return tickets.some(liveTicket) ? 'alert_repeat' : undefined
 }
+/** The words of an alarm object that name what it is about, such as a provider or model, lowercased. */
+const objectWords = (object: string | undefined): Set<string> =>
+  new Set((object ?? '').toLowerCase().split(/[\s/·,，:：|()（）]+/).filter(word => word.length >= 3))
+
+/**
+ * Tickets among `tickets` that a firing alarm's rule started within `hours` before it, on any object of the rule: a known
+ * cause the alarm may share. Those whose object shares more words with the alarm's, such as the same provider or model,
+ * come first, and among them the newest.
+ */
+export function sameRuleTickets(trigger: Trigger, tickets: Ticket[], hours: number): Ticket[] {
+  const alert = trigger.meta.alert as Partial<FeishuAlert> | undefined
+  if (!hours || alert?.status !== 'firing' || !alert.policy) return []
+  const at = Date.parse(trigger.at)
+  const words = objectWords(alert.object)
+  const started = (ticket: Ticket) => (ticket.mandate.basis.scope as { alert?: Partial<FeishuAlert> } | undefined)?.alert
+  const shared = (ticket: Ticket) => [...objectWords(started(ticket)?.object)].filter(word => words.has(word)).length
+  return tickets.filter(ticket => {
+    const age = at - Date.parse(ticket.createdAt)
+    return started(ticket)?.policy === alert.policy && age >= 0 && age < hours * 3600_000
+  }).map(ticket => ({ ticket, shared: shared(ticket) }))
+    .sort((a, b) => b.shared - a.shared || b.ticket.createdAt.localeCompare(a.ticket.createdAt)).map(item => item.ticket)
+}
 /** The id of a chat's alert Thread for `key`, under the Feishu Source. */
 export const alertThreadId = (chatId: string, key: string): string => `${chatId}:alert:${key}`
 export const isAlertThread = (id: string): boolean => id.includes(':alert:')

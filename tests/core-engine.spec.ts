@@ -12,8 +12,9 @@ function trigger(id: string, overrides: Partial<Trigger> = {}): Trigger {
 interface Hooks {
   emit?: (event: { type: string; data: Record<string, unknown> }) => void
   prepareTicket?: EngineOptions['prepareTicket']
+  kin?: EngineOptions['scope']['kin']
 }
-function harness(policyOverrides: Partial<Policy> = {}, { emit, prepareTicket }: Hooks = {}) {
+function harness(policyOverrides: Partial<Policy> = {}, { emit, prepareTicket, kin }: Hooks = {}) {
   const repo = new MemoryRepositories()
   const outbox: OutboundMessage[] = []
   const withdrawn: string[] = []
@@ -35,7 +36,8 @@ function harness(policyOverrides: Partial<Policy> = {}, { emit, prepareTicket }:
     ...policyOverrides,
   }
   let clock = 0
-  const scope: EngineOptions['scope'] = { scope: t => t.meta.blocked ? { listened: false, reason: 'chat not allowed' } : { listened: true, observed: false } }
+  const scope: EngineOptions['scope'] = { scope: t => t.meta.blocked ? { listened: false, reason: 'chat not allowed' } : { listened: true, observed: false },
+    ...kin ? { kin } : {} }
   const queued: EngineOptions['outbox'] = {
     send: message => { if (!outbox.some(item => item.id === message.id)) outbox.push(message) },
     status: id => outbox.some(item => item.id === id) ? 'pending' : undefined,
@@ -169,6 +171,21 @@ describe('eval', () => {
     h.tick(30 * 60)
     h.engine.receive(trigger('7', { threads: [{ source: 'chat', id: 'E' }] })); h.pump()
     expect(h.requests.at(-1)!).not.toHaveProperty('nearby')
+  })
+  it('shows a candidate the tickets its Source names as the same kind, at most three, leaving out its Thread\'s, nearby and stopped ones', () => {
+    const asked: string[][] = []
+    const newest = (tickets: Ticket[]) => [...tickets].sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    const h = harness({ nearbyMs: 5 * 60_000 }, { kin: (_trigger, tickets) => { asked.push(tickets.map(ticket => ticket.id)); return newest(tickets) } })
+    const ids = ['A', 'B', 'C', 'D', 'E'].map((thread, i) => { const id = accepted(h, String(i + 1), thread).ticketId!; h.tick(3600); return id })
+    h.engine.stopTicket(ids[1]!)
+    const near = accepted(h, '6', 'F').ticketId!
+    h.engine.receive(trigger('7', { threads: [{ source: 'chat', id: 'G' }] })); h.pump()
+    expect(new Set(asked.at(-1))).toEqual(new Set([ids[0], ids[2], ids[3], ids[4]]))
+    expect(h.requests.at(-1)!.nearby?.map(ticket => ticket.id)).toEqual([near])
+    expect(h.requests.at(-1)!.kin?.map(ticket => ticket.id)).toEqual([ids[4], ids[3], ids[2]])
+    const plain = harness()
+    plain.engine.receive(trigger('1')); plain.pump()
+    expect(plain.requests.at(-1)!).not.toHaveProperty('kin')
   })
   it('reaches back as far as the Policy\'s nearby window', () => {
     const h = harness({ nearbyMs: 6 * 3600_000 })
@@ -857,6 +874,21 @@ describe('worker reports', () => {
     expect(report({ question: 'Q?', askedBy: '2' })).toThrow(new UserError('notAsker'))
     expect(report({ answers: '4' })).toThrow(new UserError('notAnswerable'))
     expect(report({ answers: '1' })()).toMatchObject({ answers: ['1'] })
+  })
+  it('lets a worker answer an automated message attached to its ticket, which the main Session then sends there, and no other automated one', () => {
+    const h = harness()
+    const ticketId = accepted(h).ticketId!
+    const alarm = (id: string, thread: string) => trigger(id, { human: false, actor: { source: 'chat', id: 'bot' }, threads: [{ source: 'chat', id: thread }],
+      channel: { source: 'chat', thread, address: { message: id } } })
+    h.engine.receive(alarm('7', 'alarm-7'))
+    h.engine.receive(alarm('8', 'alarm-8'))
+    h.engine.attach(ticketId, '7'); h.settle()
+    const report = (answers: string) => () => h.engine.report(ticketId, { state: 'progress', summary: 'same cause', answers })
+    expect(report('8')).toThrow(new UserError('notAnswerable'))
+    expect(() => h.engine.reply({ purpose: 'answer', triggerId: '7', text: 'Known cause' })).toThrow(new UserError('notQuestion'))
+    expect(report('7')()).toMatchObject({ answers: ['7'] })
+    expect(h.engine.reply({ purpose: 'answer', triggerId: '7', text: 'Known cause' })).toMatchObject({ status: 'pending' })
+    expect(h.outbox.at(-1)).toMatchObject({ channel: { thread: 'alarm-7' }, text: 'Known cause', ticketId })
   })
   it('refuses a report on an ended ticket', () => {
     const h = harness()

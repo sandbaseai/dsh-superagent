@@ -4,7 +4,7 @@ import { z } from 'zod'
 import { FeishuBotSchema } from '../deployment.ts'
 import { feishuLink, sendFeishu } from './feishu-channel.ts'
 import { feishuThreadContext } from './feishu-read.ts'
-import { screenAlert } from './feishu-alert.ts'
+import { sameRuleTickets, screenAlert } from './feishu-alert.ts'
 import { refreshChatNames, runFeishu } from './feishu-loops.ts'
 import { SOURCE, feishuTriggerId } from './feishu-trigger.ts'
 import { sourceContext } from './host.ts'
@@ -32,6 +32,8 @@ const FeishuConfigSchema = FeishuBotSchema.extend({
   repeatNoticeMinutes: z.number().int().min(0).max(1440).default(0),
   /** How long after a ticket starts its analysis answers a repeat of the alarm. */
   repeatWindowHours: z.number().int().min(1).max(48).default(6),
+  /** How far back a firing alarm's Eval sees tickets of the same alert rule on other objects; 0 shows none. */
+  sameRuleHours: z.number().int().min(0).max(168).default(0),
 }).strict()
 export type FeishuConfig = z.infer<typeof FeishuConfigSchema>
 export const feishuKind: SourceKind<FeishuConfig> = {
@@ -56,12 +58,15 @@ export const feishuKind: SourceKind<FeishuConfig> = {
       hint: { zh: '一条告警已有工单分析过、又再次触发时，回复它一条短消息，附上之前的结论和分析链接；同一告警在这段时间内最多回一条。0 表示不回。', en: 'When an alarm a ticket already analysed fires again, reply to it with the earlier conclusion and a link to the analysis, at most once in this many minutes per alarm. 0 sends none.' } },
     { key: 'repeatWindowHours', type: 'number', advanced: true, min: 1, max: 48, label: { zh: '重复告警的判断时长 / 小时', en: 'Repeat alarm window / h' },
       hint: { zh: '工单建立后多久内，同一告警再次触发算作重复；应与评估规则里的重复时长一致。', en: 'How long after a ticket starts a new firing of its alarm counts as a repeat; keep it equal to the repeat window in the Eval rules.' } },
+    { key: 'sameRuleHours', type: 'number', advanced: true, min: 0, max: 168, label: { zh: '同一告警规则的回看时长 / 小时', en: 'Same alarm rule lookback / h' },
+      hint: { zh: '评估一条正在触发的告警时，列出这段时间内同一告警规则（任意对象）建过的工单，最多 3 张，供规则判断是否为同一原因、挂到那张工单上复核。0 表示不列。', en: 'When an Eval assesses a firing alarm, list the tickets the same alarm rule started on any object within this many hours, at most three, so a rule can attach the alarm to one with the same cause for a recheck. 0 lists none.' } },
     { key: 'readPageSize', type: 'number', advanced: true, min: 1, max: 50, label: { zh: '每页消息数', en: 'Messages per page' }, hint: { zh: '智能体读取线程和群历史时，每页的消息数。', en: 'Messages per page when agents read Threads and chat history.' } },
     { key: 'linkTimeoutMs', type: 'number', advanced: true, min: 1, max: 90000, label: { zh: '原消息链接的查询时限 / 毫秒', en: 'Original message link time limit / ms' },
       hint: { zh: '查询原消息链接最多等待的时间；超时后智能体改为直接读取原消息。', en: 'How long to wait for an original message\'s link; after that, agents read the message itself.' } },
   ],
   health: ['feishu', 'history', 'alerts'],
   screen: (trigger, tickets) => screenAlert(trigger, tickets),
+  kin: (trigger, tickets, config) => sameRuleTickets(trigger, tickets, config.sameRuleHours),
   scope({ meta }, config) {
     if (meta.direct === true) return config.directMessages ? { listened: true, observed: false, row: 'direct' } : { listened: false, reason: 'direct_messages_not_allowed' }
     const chat = config.chats.find(item => item.chatId === meta.chatId)
