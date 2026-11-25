@@ -66,6 +66,8 @@ export async function candidateCard(host: LinkHost, candidate: Candidate) {
     mode: settings.eval.mode, ...others.length ? { batch: others.map(trigger => triggerCard(trigger)) } : {},
     ...handedBack.length ? { handed_back: handedBack } : {}, ...relatedTickets(candidate.tickets),
     ...(delivered.length ? { delivered_to: delivered } : {}), ...(referenced.length ? { referenced_tickets: referenced.map(ticketCard) } : {}),
+    // On the card itself, so a decision taken from the card alone still sees the tickets an alarm of a known cause may join.
+    ...candidate.kin?.length ? { same_rule_tickets: candidate.kin.map(ticket => ({ ...ticketCard(ticket), created_at: ticket.createdAt })) } : {},
     next_action: candidate.strength === 'explicit' ? 'Route it with orchestrator_route as dispatch says: accept, attach, stop or ignore.'
       : 'Ignore it with orchestrator_route if the card shows it touches no enabled rule; else assess it with orchestrator_eval, orchestrator_eval_read, then orchestrator_eval_decide.' }
 }
