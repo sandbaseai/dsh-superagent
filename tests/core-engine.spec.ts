@@ -1440,6 +1440,16 @@ describe('model-surface review', () => {
     h.tick(1); h.engine.receive(trigger('3'))
     expect(h.repo.tickets.get(ticketId)!.ended).toBeUndefined()
   })
+  it('resumes an ended ticket on an automated message the main Session attaches asking it to resume', () => {
+    const h = harness()
+    const ticketId = accepted(h).ticketId!
+    h.engine.report(ticketId, { state: 'ready', summary: 'Done' })
+    h.tick(1); h.engine.receive(trigger('2', { human: false, actor: { source: 'chat', id: 'alarm' }, threads: [{ source: 'chat', id: 'alarm' }] }))
+    h.engine.attach(ticketId, '2', 'same cause', true)
+    const ticket = h.repo.tickets.get(ticketId)!
+    expect(ticket.ended).toBeUndefined()
+    expect(ticket.inputs).toContainEqual(expect.objectContaining({ kind: 'resumed', triggerId: '2' }))
+  })
 })
 describe('follow-up review: turn ends', () => {
   const merge = (h: ReturnType<typeof harness>) => h.engine.threadClosed({ source: 'gh', id: 'pr-9' }, 'merged', '2026-09-23T00:00:01Z')

@@ -244,19 +244,23 @@ export class Tickets extends EnginePart {
     else if (latest?.state === 'pending' && !waitsForPerson(ticket)) this.options.executor.start(ticket, latest)
   }
   /**
-   * Resume an ended ticket under its unchanged Mandate when a person's message on one of its Threads waits for it: no Eval
-   * and no Decision, since nothing new is authorized. One whose Mandate the current Policy no longer holds stays ended and
+   * Resume an ended ticket under its unchanged Mandate when a person's message on one of its Threads waits for it, or the
+   * automated Trigger `routed` the main Session attached to it asking it to resume, such as an alarm whose cause it found:
+   * no Eval and no Decision, since nothing new is authorized. Such a Trigger that waits out a pause resumes the ticket only
+   * with a person's message. One whose Mandate the current Policy no longer holds stays ended and
    * takes nothing (see `refuse`). While processing is paused the message waits, and the first pass after the pause resumes
    * the ticket under the Policy then. Reads the ticket afresh, so it is idempotent and leaves an already-resumed ticket alone.
    */
-  wake(ticketId: string): void {
+  wake(ticketId: string, routed?: string): void {
     const ticket = this.repo.tickets.get(ticketId)
     if (!ticket || liveTicket(ticket) || ticket.ended?.by === 'human' || !ticket.undelivered.length) return
     const policy = this.policy()
     if (policy.paused) return
     if (!policy.revalidate(ticket.mandate)) { this.refuse(ticket); return }
-    // Only a human's message resumes an ended ticket; bot/CI triggers wait alongside inputs from before the ticket ended.
-    const first = ticket.undelivered.map(id => ticket.inputs.find(input => input.id === id)).find(input => input?.kind === 'trigger' && input.human)
+    // A human's message resumes an ended ticket, and so does an automated one the main Session attached asking it to resume
+    // (`routed`); other bot/CI triggers wait alongside inputs from before the ticket ended.
+    const first = ticket.undelivered.map(id => ticket.inputs.find(input => input.id === id))
+      .find(input => input?.kind === 'trigger' && (input.human || input.triggerId === routed))
     if (first?.kind !== 'trigger') return
     const at = this.now()
     delete ticket.ended; ticket.updatedAt = at

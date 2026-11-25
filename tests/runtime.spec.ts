@@ -1004,6 +1004,41 @@ describe('the Feishu on-call kit', () => {
     const replies = vi.mocked(Commands.prototype.lark).mock.calls.map(([args]) => args).filter(args => args[1] === '+messages-reply')
     expect(replies).toEqual([expect.arrayContaining(['--message-id', 'om_qpsfiring', '--reply-in-thread'])])
   })
+  it('shows a firing alarm on another object of the rule the earlier ticket, attaches it there, and answers it in its own thread', async () => {
+    const next = await alertDeployment()
+    const feishu = next.store.settings().sources.feishu!
+    await next.settings.save('source:feishu', { enabled: true, config: { ...feishu.config, sameRuleHours: 72 } }, next.store.blockRevision('source:feishu'), 'panel')
+    const first = alertTrigger(qpsFiring)
+    await receive(first, next)
+    vi.spyOn(Commands.prototype, 'lark').mockResolvedValue({ items: [{ message_id: 'om_qpsfiring', chat_id: TENCENT_CHAT }] })
+    await runTool(next.masterId, 'orchestrator_eval', { trigger_id: first.id })
+    const accepted = await runTool(next.masterId, 'orchestrator_eval_decide', qpsDecision(first.id))
+    const ticket = next.store.tickets.get((accepted.ticket as { ticket_id: string }).ticket_id)!
+    await next.idle()
+    await runTool(`worker-${ticket.id}`, 'orchestrator_report', { state: 'ready', summary: '**结论**：客户批量调用造成流量突增，不是 Fallback（高）。' })
+    expect(next.store.tickets.get(ticket.id)!.ended).toMatchObject({ outcome: 'completed' })
+    // The ticket started two hours ago, past the nearby window, so it is a same-rule ticket and not a nearby one.
+    next.store.tickets.save({ ...next.store.tickets.get(ticket.id)!, createdAt: new Date(Date.now() - 2 * 3600_000).toISOString() })
+    // Now the rule fires on another provider: a new alert Thread, whose candidate card names the earlier ticket.
+    deliveries.mockClear()
+    const other = { ...qpsFiring, message_id: 'om_qpsother', create_time: String(Date.now()),
+      body: { content: qpsFiring.body!.content.replaceAll('provider-a 流量突增', 'provider-b 流量突增') } }
+    const later = alertTrigger(other)
+    expect(later.threads[0]).not.toEqual(first.threads[0])
+    await receive(later, next)
+    expect(candidates(next).at(-1)).toMatchObject({ trigger_id: later.id, same_rule_tickets: [{ ticket_id: ticket.id, title: QPS_TITLE }] })
+    expect(await runTool(next.masterId, 'orchestrator_route', { decisions: [{ kind: 'attach', trigger_id: later.id, ticket_id: ticket.id,
+      note: 'same-rule recheck: 客户批量调用造成流量突增', resume: true }] })).toMatchObject({ results: [{ kind: 'attach', ticket: { ticket_id: ticket.id } }] })
+    await next.idle()
+    expect(next.store.tickets.get(ticket.id)!.ended).toBeUndefined()
+    await runTool(`worker-${ticket.id}`, 'orchestrator_report', { state: 'ready', summary: '已知问题：客户批量调用造成流量突增，原因未变。', reply_to_trigger_id: later.id })
+    expect(relays(next.masterId).at(-1)).toMatchObject({ kind: 'worker_report', answer_to: later.id })
+    vi.mocked(Commands.prototype.lark).mockClear()
+    expect(await runTool(next.masterId, 'orchestrator_reply', { trigger_id: later.id, purpose: 'answer', text: '已知问题：客户批量调用造成流量突增，原因未变。' }))
+      .toEqual({ status: 'sent' })
+    const replies = vi.mocked(Commands.prototype.lark).mock.calls.map(([args]) => args).filter(args => args[1] === '+messages-reply')
+    expect(replies).toEqual([expect.arrayContaining(['--message-id', 'om_qpsother', '--reply-in-thread'])])
+  })
   it('in observe mode records a would-accept, shows it to the assessor of a repeat, and ignores the recovery card without an assessment', async () => {
     const next = await alertDeployment()
     await next.settings.save('eval', { mode: 'observe', timeoutSeconds: 120, model: null }, next.store.blockRevision('eval'), 'panel')

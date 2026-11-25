@@ -103,10 +103,11 @@ export class Engine {
    * Input with the routing note, and the Eval that holds the Trigger ends, since the ticket has it now; the other Triggers of
    * its batch wait for a fresh Eval. A note for an Input the worker already received goes out as a new Input, and so does a
    * message the ticket let go, read for context only, or had before it ended. An ended ticket resumes under its Mandate, at
-   * once unless processing is paused.
+   * once unless processing is paused, for a person's message, or for an automated one with `resume`, such as an alarm whose
+   * cause the ticket found and rechecks.
    * @throws UserError for a ticket a person stopped, which withdrew its Mandate, or one whose Mandate the Policy no longer holds.
    */
-  attach(ticketId: string, triggerId: string, note?: string): Ticket {
+  attach(ticketId: string, triggerId: string, note?: string, resume = false): Ticket {
     return this.repo.atomic(() => {
       // A message this ticket's worker handed back is not its work: attached here, no worker would decide it, and it could not be handed back again.
       const handedBack = this.repo.triggers.disposition(triggerId)?.handbacks?.some(item => item.ticketId === ticketId)
@@ -115,7 +116,7 @@ export class Engine {
       this.evals.withdraw(trigger)
       this.tickets.attach(ticketId, trigger, note)
       this.evals.routed(triggerId, ticketId)
-      this.tickets.wake(ticketId)
+      this.tickets.wake(ticketId, resume ? triggerId : undefined)
       return this.repo.tickets.get(ticketId)!
     })
   }
