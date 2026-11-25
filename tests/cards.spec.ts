@@ -113,6 +113,9 @@ it.each(RULES)('%s (%s)', (_rule, file, says, gone = []) => {
 
 it('keeps each role\'s own instructions short', () => {
   expect(masterPrompt.length).toBeLessThan(1400)
+  // The summarizer reads the system prompt too: it keeps open work and rules, and leaves what the store holds.
+  expect(masterPrompt).toContain('end the turn after a decision or reply, with no report or recap')
+  expect(masterPrompt).toContain('as the store keeps past decisions and tickets')
   expect(workerPrompt.length).toBeLessThan(1000)
 })
 
