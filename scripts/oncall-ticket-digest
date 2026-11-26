@@ -8,11 +8,17 @@ with a bot-only lark-cli. It changes no system and no setting.
 
   oncall-ticket-digest [--url http://127.0.0.1:3082] --known FILE --chat oc_... [--hours 24] [--dry-run]
 
+With --sessions (the DSH sessions directory on this machine), it also checks a sample of the window's finished tickets: it
+reads each worker's Session, read-only, and asks the model whether the reply is backed by what the worker saw, counting the
+replies that assert a cause, or that something is unaffected, without evidence.
+
 Exit 0 posted (or printed with --dry-run), 1 the model, the management API or the post failed, 2 a bad argument.
 """
 
 import argparse
 import concurrent.futures
+import glob
+import random
 import datetime
 import json
 import os
@@ -62,6 +68,29 @@ Tickets:
 """
 
 
+# The evidence check: how much of a worker's Session the model reads, and how many tickets a day it checks.
+SEEN_CHARS = 140_000
+ITEM_CHARS = 12_000
+CHECK_PROMPT = """You audit an on-call agent. Below is its reply to an alert, then everything it saw: [input] messages (the alert card, known
+issues, notes) and its tool calls with their results. Judge only whether the reply is backed by what it saw; do not judge whether
+you would have reached another cause. Numbers computed from what it saw (sums, ratios, rounding) count as backed; times may differ
+by time zone (UTC vs +08:00); a result cut short or a part of the transcript omitted is NOT a fault of the reply: treat a claim
+that may rest on missing text as backed.
+Classify:
+- major: the cause in 结论 is contradicted by what it saw, or rests on nothing it saw; or 结论/影响 asserts no fault or no impact
+  (for example "服务没有异常", "上游没有报错", "没有用户受影响") that it never checked or that its results contradict.
+- minor: a figure, name or detail is wrong or unbacked, or a claim is stated more firmly than a sample supports, without changing
+  the cause.
+Answer with JSON only: {{"major": ["<one short Chinese sentence each>"], "minor": ["<one short Chinese sentence each>"]}}
+
+REPLY:
+{reply}
+
+WHAT IT SAW:
+{seen}
+"""
+
+
 class Invalid(Exception):
     """A bad argument."""
 
@@ -108,7 +137,7 @@ def read_tickets(url, since):
                     tickets.append({'id': ticket['id'][:8], 'ref': ticket['id'], 'created': at, 'at': at.astimezone(SHANGHAI).strftime('%m-%d %H:%M'),
                                     'title': ticket['title'][:160],
                                     'outcome': (ticket.get('ended') or {}).get('outcome', 'open'),
-                                    'conclusion': conclusion(ticket.get('summary', ''))})
+                                    'conclusion': conclusion(ticket.get('summary', '')), 'summary': ticket.get('summary', '')})
             # Lists put the most recently updated first, and a ticket is updated no earlier than it was created.
             offset = listed.get('next_offset')
             if items and parse_time(items[-1]['updatedAt']) < since:
@@ -250,7 +279,8 @@ def ask(base_url, key, model, prompt):
     request = urllib.request.Request(base_url.rstrip('/') + '/v1/messages', data=body, method='POST', headers={
         'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01'})
     try:
-        with urllib.request.urlopen(request, timeout=180) as response:
+        # Grouping a day of tickets can take the gateway several minutes.
+        with urllib.request.urlopen(request, timeout=420) as response:
             answer = json.loads(response.read())
     except urllib.error.HTTPError as error:
         raise RuntimeError(f'the gateway answered {error.code}: {error.read()[:300]!r}') from None
@@ -372,6 +402,81 @@ def digest_markdown(issues, headline, hours, total, now, feedback_lines=(), know
     return '\n'.join(lines)
 
 
+def worker_seen(sessions, ticket_ref):
+    """What a ticket's worker saw, from its Session on this machine: the messages it was given and its tool calls and results,
+    each cut to ITEM_CHARS and the whole to SEEN_CHARS (its middle left out); empty when the Session is not here."""
+    out = []
+    for path in glob.glob(os.path.join(sessions, '*', f'worker-{ticket_ref}', 'session*.zstd')):
+        text = subprocess.run(['zstd', '-dc', path], capture_output=True, timeout=60).stdout.decode('utf-8', 'ignore')
+        for line in text.split('\n'):
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            data = event.get('data') or {}
+            parts = lambda message: ''.join(part.get('text', '') for part in (message.get('content') or [])
+                                            if isinstance(message.get('content'), list) and isinstance(part, dict))
+            if event.get('type') == 'user/message':
+                body = parts(data)
+                if body and 'Time sampled while preparing' not in body:
+                    out.append(f'[input] {body[:ITEM_CHARS]}')
+            elif event.get('type') == 'tool/call':
+                out.append(f'[call {data.get("name")}] {str(data.get("arguments", ""))[:1500]}')
+            elif event.get('type') == 'tool/result':
+                message = data.get('message') or {}
+                out.append(f'[result{" ERROR" if message.get("isError") else ""}] {parts(message)[:ITEM_CHARS]}')
+    seen = '\n'.join(out)
+    return seen if len(seen) <= SEEN_CHARS else seen[:SEEN_CHARS // 2] + '\n...[middle omitted]...\n' + seen[-SEEN_CHARS // 2:]
+
+
+def confidence(summary):
+    """The confidence the reply's 结论 states: 高, 中, 低, or '' when it states none."""
+    match = re.search(r'\*\*结论\*\*[:：]?\s*(.+)', summary)
+    found = re.search(r'置信度[^高中低\n]{0,4}([高中低])', match.group(1)) if match else None
+    return found.group(1) if found else ''
+
+
+def check_evidence(tickets, sessions, size, ask_model):
+    """`[{ticket, major, minor}]` for a sample of up to `size` finished tickets whose reply states a cause and whose worker's
+    Session is here; the sample is drawn by the date, so a rerun of the same day checks the same tickets."""
+    ready = [ticket for ticket in tickets if ticket['outcome'] == 'completed' and '**结论**' in ticket['summary']
+             and '已知问题' not in ticket['summary'][:400]]
+    random.Random(now_utc().strftime('%Y-%m-%d')).shuffle(ready)
+    checked = []
+    for ticket in ready:
+        if len(checked) >= size:
+            break
+        seen = worker_seen(sessions, ticket['ref'])
+        if not seen:
+            continue
+        reply = ticket['summary'].split('\n---\n')[0][:6000]
+        try:
+            text = ask_model(CHECK_PROMPT.format(reply=reply, seen=seen))
+            match = re.search(r'\{[\s\S]*\}', text)
+            verdict = json.loads(match.group(0)) if match else {}
+        except (RuntimeError, ValueError, OSError) as error:
+            print(f'oncall-ticket-digest: evidence check of {ticket["id"]} failed: {error}', file=sys.stderr)
+            continue
+        checked.append({'ticket': ticket, 'confidence': confidence(ticket['summary']),
+                        'major': [str(item)[:200] for item in verdict.get('major') or []][:3],
+                        'minor': [str(item)[:200] for item in verdict.get('minor') or []]})
+    return checked
+
+
+def evidence_markdown(checked):
+    """The digest's lines on the evidence check: how many replies have a major issue, how many of the 高 ones do, and each one."""
+    if not checked:
+        return []
+    major = [item for item in checked if item['major']]
+    high = [item for item in checked if item['confidence'] == '高']
+    high_major = [item for item in high if item['major']]
+    lines = [f'**证据抽查**（{len(checked)} 张给出原因的工单）：{len(major)} 张结论缺证据或与证据矛盾'
+             + (f'，其中置信度高的 {len(high_major)}/{len(high)} 张' if high else '')
+             + f'；{sum(1 for item in checked if not item["major"] and item["minor"])} 张只有细节问题。']
+    lines += [f'- {item["ticket"]["title"][:60]}（`{item["ticket"]["id"]}`）：{item["major"][0]}' for item in major]
+    return lines + ['']
+
+
 def post(lark, chat, text):
     with tempfile.TemporaryDirectory(prefix='ticket-digest-') as scratch:
         Path(scratch, 'digest.md').write_text(text)
@@ -396,6 +501,8 @@ def main():
     parser.add_argument('--fix-state', type=Path, default=Path.home() / '.local' / 'state' / 'oncall-fix.json',
                         help='the oncall-fix state, whose fixes of the feedback window are counted')
     parser.add_argument('--feedback-hours', type=int, default=48, help='count 👍/👎 on replies of the tickets of this many hours (0: none)')
+    parser.add_argument('--sessions', default='', help='the DSH sessions directory, such as ~/.dsh/sessions, to check workers\' evidence')
+    parser.add_argument('--check', type=int, default=10, help='how many tickets the evidence check reads (0: none)')
     parser.add_argument('--dry-run', action='store_true', help='print the digest and the known list; post and write nothing')
     args = parser.parse_args()
     try:
@@ -407,6 +514,10 @@ def main():
             raise Invalid('--hours must be 1-168')
         if not 0 <= args.feedback_hours <= 168:
             raise Invalid('--feedback-hours must be 0-168')
+        if not 0 <= args.check <= 30:
+            raise Invalid('--check must be 0-30')
+        if args.sessions and not os.path.isdir(os.path.expanduser(args.sessions)):
+            raise Invalid('--sessions must be a directory')
         if not args.base_url.startswith('https://') or not args.model:
             raise Invalid('--base-url (https://...) and --model are required, or ONCALL_LLM_BASE_URL and ONCALL_DIGEST_MODEL')
     except Invalid as error:
@@ -417,13 +528,20 @@ def main():
         tickets = read_tickets(args.url, now - datetime.timedelta(hours=args.hours))
         known = json.loads(args.known.read_text()) if args.known.exists() else []
         fixes = read_fixes(args.fix_state)
+        evidence = []
         if tickets:
             fixed_by = {str(fix.get('ticket', ''))[:8]: fix['pr_url'] for fix in sorted(fixes, key=lambda fix: fix.get('created', '')) if fix.get('pr_url')}
-            shown = [{k: v for k, v in ticket.items() if k not in ('ref', 'created')} | ({'fix_pr': fixed_by[ticket['id']]} if ticket['id'] in fixed_by else {})
+            hidden = ('ref', 'created', 'summary')
+            shown = [{k: v for k, v in ticket.items() if k not in hidden} | ({'fix_pr': fixed_by[ticket['id']]} if ticket['id'] in fixed_by else {})
                      for ticket in tickets]
             prompt = PROMPT.format(hours=args.hours, known=json.dumps([{k: entry.get(k) for k in ('key', 'title', 'cause', 'status')} for entry in known],
                                                                          ensure_ascii=False), tickets=json.dumps(shown, ensure_ascii=False, indent=0))
             issues, headline = parse_answer(ask(args.base_url, api_key(args.credentials, args.key_ref), args.model, prompt), [t['id'] for t in tickets])
+            if args.sessions and args.check:
+                key = api_key(args.credentials, args.key_ref)
+                checked = check_evidence(tickets, os.path.expanduser(args.sessions), args.check,
+                                         lambda text: ask(args.base_url, key, args.model, text))
+                evidence = evidence_markdown(checked)
         else:
             issues, headline = [], f'过去 {args.hours} 小时没有工单。'
         known = merge(known, issues, now, fixes)
@@ -436,7 +554,7 @@ def main():
                 print(f'oncall-ticket-digest: feedback not read: {error}', file=sys.stderr)
                 counts = None
             lines = feedback_markdown(marked, counts, args.feedback_hours)
-        lines = fix_markdown(fixes, args.feedback_hours or 48, now) + lines
+        lines = fix_markdown(fixes, args.feedback_hours or 48, now) + evidence + lines
         if args.hours == 24:
             attached = attached_alarms(args.url)
             if attached:
