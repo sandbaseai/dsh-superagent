@@ -641,6 +641,7 @@ const TEXT = {
   'reason.admission_ignored': ['准入设为忽略', 'Admission set to ignore'],
   'reason.alert_recovered': ['告警恢复通知', 'Alert recovery notice'],
   'reason.alert_repeat': ['同一告警已有进行中的工单', 'Repeat of an alert with an open ticket'],
+  'reason.alert_analysed': ['同一告警不久前已分析过', 'Repeat of an alert analysed recently'],
   'reason.chat_not_allowed': ['群不在监听的群里', 'Chat is not a listened chat'],
   'reason.direct_messages_not_allowed': ['私聊未开放', 'Direct messages are off'],
   'reason.observation_only': ['仅观察的群（旧版过滤）', 'Observe-only chat (legacy filter)'],

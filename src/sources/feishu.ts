@@ -57,7 +57,7 @@ export const feishuKind: SourceKind<FeishuConfig> = {
     { key: 'repeatNoticeMinutes', type: 'number', advanced: true, min: 0, max: 1440, label: { zh: '重复告警的提示间隔 / 分钟', en: 'Repeat alarm notice interval / min' },
       hint: { zh: '一条告警已有工单分析过、又再次触发时，回复它一条短消息，附上之前的结论和分析链接；同一告警在这段时间内最多回一条，其余的只加一个 ✅ 表情。0 表示不回也不加。', en: 'When an alarm a ticket already analysed fires again, reply to it with the earlier conclusion and a link to the analysis, at most once in this many minutes per alarm, and put a ✅ reaction on every such repeat. 0 sends neither.' } },
     { key: 'repeatWindowHours', type: 'number', advanced: true, min: 1, max: 48, label: { zh: '重复告警的判断时长 / 小时', en: 'Repeat alarm window / h' },
-      hint: { zh: '工单建立后多久内，同一告警再次触发算作重复；应与评估规则里的重复时长一致。', en: 'How long after a ticket starts a new firing of its alarm counts as a repeat; keep it equal to the repeat window in the Eval rules.' } },
+      hint: { zh: '工单建立后多久内，同一告警再次触发算作重复：开了重复提示时，宿主直接跳过这样的重复，不再交给评估。应与评估规则里的重复时长一致。', en: 'How long after a ticket starts a new firing of its alarm counts as a repeat: with repeat notices on, the host sets such a repeat aside without an Eval. Keep it equal to the repeat window in the Eval rules.' } },
     { key: 'sameRuleHours', type: 'number', advanced: true, min: 0, max: 168, label: { zh: '同一告警规则的回看时长 / 小时', en: 'Same alarm rule lookback / h' },
       hint: { zh: '评估一条正在触发的告警时，列出这段时间内同一告警规则（任意对象）建过的工单，最多 3 张，供规则判断是否为同一原因、挂到那张工单上复核。0 表示不列。', en: 'When an Eval assesses a firing alarm, list the tickets the same alarm rule started on any object within this many hours, at most three, so a rule can attach the alarm to one with the same cause for a recheck. 0 lists none.' } },
     { key: 'readPageSize', type: 'number', advanced: true, min: 1, max: 50, label: { zh: '每页消息数', en: 'Messages per page' }, hint: { zh: '智能体读取线程和群历史时，每页的消息数。', en: 'Messages per page when agents read Threads and chat history.' } },
@@ -65,7 +65,7 @@ export const feishuKind: SourceKind<FeishuConfig> = {
       hint: { zh: '查询原消息链接最多等待的时间；超时后智能体改为直接读取原消息。', en: 'How long to wait for an original message\'s link; after that, agents read the message itself.' } },
   ],
   health: ['feishu', 'history', 'alerts'],
-  screen: (trigger, tickets) => screenAlert(trigger, tickets),
+  screen: (trigger, tickets, config) => screenAlert(trigger, tickets, config.repeatNoticeMinutes ? config.repeatWindowHours : 0),
   kin: (trigger, tickets, config) => sameRuleTickets(trigger, tickets, config.sameRuleHours),
   scope({ meta }, config) {
     if (meta.direct === true) return config.directMessages ? { listened: true, observed: false, row: 'direct' } : { listened: false, reason: 'direct_messages_not_allowed' }
