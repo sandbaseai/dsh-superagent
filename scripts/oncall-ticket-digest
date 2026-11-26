@@ -12,8 +12,10 @@ With --sessions (the DSH sessions directory on this machine), it also checks a s
 reads each worker's Session, read-only, and asks the model whether the reply is backed by what the worker saw, counting the
 replies that assert a cause, or that something is unaffected, without evidence.
 
-With --brief it posts a short summary of the last --hours (2 by default) instead: how the window's alarms were handled,
-what a person should look at, and which known issues kept firing. It reads the known list and writes nothing.
+With --brief it posts a short summary of the last --hours (3 by default) instead: how the window's alarms were handled,
+what a person should look at, and which known issues kept firing. It reads the known list and writes nothing. Before it
+posts, each item to look at must name a ticket of the window that has a conclusion, and a second model call checks each
+against that ticket's report; an item either check refuses is left out, and one the review doubts is marked 待确认.
 
 Exit 0 posted (or printed with --dry-run), 1 the model, the management API or the post failed, 2 a bad argument.
 """
@@ -538,7 +540,54 @@ def handling(decision):
     return 'other'
 
 
-def brief_markdown(answer, counts, hours, now):
+REVIEW_PROMPT = """You check a summary an on-call bot is about to post to engineers. Each item below claims something needs a
+person, and comes with the full report of the ticket it cites. For each item, answer whether the report supports it:
+"keep" when the report states the problem and that a person must act; "doubt" when the report is unsure (low confidence,
+open questions) but the item may still be right; "drop" when the report does not say it, says the opposite, calls it a false
+alarm, a known issue firing as before, a client's own traffic or already recovered, or when nobody needs to act.
+
+Answer with one JSON object and nothing else: {{"verdicts": [{{"index": 0, "verdict": "keep" | "doubt" | "drop", "reason":
+"one short Chinese sentence"}}]}}
+
+Items:
+{items}
+"""
+
+
+def cited(attention, tickets):
+    """The attention items that cite at least one ticket of the window with a conclusion, each with those tickets."""
+    by_id = {ticket['id']: ticket for ticket in tickets if ticket.get('conclusion')}
+    kept = []
+    for item in attention:
+        found = [by_id[str(ticket_id)[:8]] for ticket_id in item.get('ticket_ids') or [] if str(ticket_id)[:8] in by_id]
+        if found:
+            kept.append({**item, 'tickets': found})
+        else:
+            print(f'oncall-ticket-digest: left out {item.get("title")!r}: it names no ticket of the window with a conclusion', file=sys.stderr)
+    return kept
+
+
+def review(attention, ask_model):
+    """The attention items a second model call finds supported by their tickets' reports, marked `doubt` when it is unsure."""
+    if not attention:
+        return []
+    shown = [{'index': index, 'title': item.get('title'), 'why': item.get('why'),
+              'reports': [ticket['summary'][:ITEM_CHARS] for ticket in item['tickets']]} for index, item in enumerate(attention)]
+    text = ask_model(REVIEW_PROMPT.format(items=json.dumps(shown, ensure_ascii=False, indent=0)))
+    match = re.search(r'\{[\s\S]*\}', text)
+    if not match:
+        raise RuntimeError('the review answered no JSON object')
+    answered = {verdict.get('index'): verdict for verdict in json.loads(match.group(0)).get('verdicts') or []}
+    verdicts = {index: verdict.get('verdict') for index, verdict in answered.items()}
+    for index, item in enumerate(attention):
+        if verdicts.get(index) not in ('keep', 'doubt'):
+            reason = (answered.get(index) or {}).get('reason') or 'no verdict'
+            print(f'oncall-ticket-digest: left out {item.get("title")!r}: the review said {verdicts.get(index)}: {reason}', file=sys.stderr)
+    # An item the review did not answer is not posted: the review is what lets it through.
+    return [{**item, 'doubt': verdicts[index] == 'doubt'} for index, item in enumerate(attention) if verdicts.get(index) in ('keep', 'doubt')]
+
+
+def brief_markdown(answer, counts, hours, now, attention=None):
     stamp = now.astimezone(SHANGHAI)
     start = (stamp - datetime.timedelta(hours=hours)).strftime('%H:%M')
     total = sum(counts.values())
@@ -547,8 +596,11 @@ def brief_markdown(answer, counts, hours, now):
              + (f' · 超时未判断 {counts["timeout"]}' if counts['timeout'] else '') + (f' · 其他 {counts["other"]}' if counts['other'] else '') + '）']
     if answer.get('headline'):
         lines.append(str(answer['headline'])[:300])
-    attention = [item for item in answer.get('attention') or [] if item.get('title')][:5]
-    lines += ['', '**需要关注**'] + ([f'- **{item["title"][:60]}**：{str(item.get("why", ""))[:200]}' for item in attention] or ['- 无'])
+    if attention is None:
+        attention = [item for item in answer.get('attention') or [] if item.get('title')][:5]
+    lines += ['', '**需要关注**'] + ([f'- **{item["title"][:60]}**' + ('（待确认）' if item.get('doubt') else '')
+                                     + f'：{str(item.get("why", ""))[:200]}' + (f'（工单 `{item["tickets"][0]["id"]}`）' if item.get('tickets') else '')
+                                     for item in attention] or ['- 无'])
     ongoing = [item for item in answer.get('ongoing') or [] if item.get('title')][:8]
     if ongoing:
         lines += ['', '**持续中的已知问题**'] + [f'- {item["title"][:60]}（{item.get("alarms", "?")} 条）' for item in ongoing]
@@ -581,11 +633,11 @@ def main():
     parser.add_argument('--feedback-hours', type=int, default=48, help='count 👍/👎 on replies of the tickets of this many hours (0: none)')
     parser.add_argument('--sessions', default='', help='the DSH sessions directory, such as ~/.dsh/sessions, to check workers\' evidence')
     parser.add_argument('--check', type=int, default=10, help='how many tickets the evidence check reads (0: none)')
-    parser.add_argument('--brief', action='store_true', help='post the short alarm summary of the last --hours (default 2) instead')
+    parser.add_argument('--brief', action='store_true', help='post the short alarm summary of the last --hours (default 3) instead')
     parser.add_argument('--dry-run', action='store_true', help='print the digest and the known list; post and write nothing')
     args = parser.parse_args()
     if args.hours is None:
-        args.hours = 2 if args.brief else 24
+        args.hours = 3 if args.brief else 24
     try:
         if not re.fullmatch(r'oc_[A-Za-z0-9]+', args.chat):
             raise Invalid('--chat must be a Feishu chat id (oc_...)')
@@ -680,11 +732,17 @@ def brief(args, now):
                                      tickets=json.dumps(shown, ensure_ascii=False, indent=0),
                                      known=json.dumps([{k: entry.get(k) for k in ('title', 'cause', 'needs_human', 'firstSeen')}
                                                        for entry in known if entry.get('status') == 'open'], ensure_ascii=False))
-        text = ask(args.base_url, api_key(args.credentials, args.key_ref), args.model, prompt)
+        key = api_key(args.credentials, args.key_ref)
+        text = ask(args.base_url, key, args.model, prompt)
         match = re.search(r'\{[\s\S]*\}', text)
         if not match:
             raise RuntimeError('the model answered no JSON object')
-        markdown = brief_markdown(json.loads(match.group(0)), counts, args.hours, now)
+        answer = json.loads(match.group(0))
+        proposed = [item for item in answer.get('attention') or [] if item.get('title')][:5]
+        attention = review(cited(proposed, tickets), lambda text: ask(args.base_url, key, args.model, text))
+        if len(attention) < len(proposed):
+            print(f'oncall-ticket-digest: {len(proposed) - len(attention)} of {len(proposed)} attention items left out by the checks', file=sys.stderr)
+        markdown = brief_markdown(answer, counts, args.hours, now, attention)
         if args.dry_run:
             print(markdown)
             return 0
