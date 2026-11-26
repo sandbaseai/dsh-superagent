@@ -264,6 +264,29 @@ describe('feishu source', () => {
     expect(conclusionOf('**结论**\n多行\n结论\n**证据**: x')).toBe('多行 结论')
     h.store.close()
   })
+  it('marks a repeat of an alarm whose ticket was dropped, as the host skips it, and not one a person stopped', async () => {
+    const h = host()
+    const start = Date.parse('2026-11-15T06:00:00Z')
+    const first = feishuTrigger(historyEvent({ ...qpsFiring, create_time: String(start) }, ALERT_CHAT, false), 'ou_bot', 'cli_bot')!
+    h.store.triggers.save(first)
+    const alertThread = first.threads[0]!
+    h.store.threads.save({ key: `feishu:${alertThread.id}`, ref: alertThread, createdAt: first.at, subscriptions: ['t'], correlated: [], pending: [], meta: {} })
+    vi.spyOn(h.commands, 'withSignal').mockReturnValue(h.commands)
+    const lark = vi.spyOn(h.commands, 'lark').mockResolvedValue({ messages: [] })
+    const config = { repeatNoticeMinutes: 30, repeatWindowHours: 6 } as never
+    const reacted = () => lark.mock.calls.filter(([args]) => args[0] === 'api' && args[1] === 'POST').length
+    const repeat = (minutes: number) => feishuTrigger(historyEvent({ ...qpsOngoing, create_time: String(start + minutes * 60_000),
+      message_id: `${qpsOngoing.message_id}-${minutes}` }, ALERT_CHAT, false), 'ou_bot', 'cli_bot')!
+    const ticket = (by: 'executor' | 'human', outcome: 'dropped' | 'stopped') => h.store.tickets.save({ ...openTicket('t'), createdAt: first.at,
+      origin: { triggerId: first.id, triggerIds: [first.id] }, ended: { at: first.at, by, outcome } })
+    ticket('executor', 'dropped')
+    await repeatNotice(h, repeat(10), config)
+    expect(reacted()).toBe(1)
+    ticket('human', 'stopped')
+    await repeatNotice(h, repeat(20), config)
+    expect(reacted()).toBe(1)
+    h.store.close()
+  })
   it('cuts the earlier conclusion of a repeat notice so the notice with its link stays within the IM limit', async () => {
     const h = host()
     const start = Date.parse('2026-11-15T06:00:00Z')
