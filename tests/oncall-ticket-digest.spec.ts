@@ -2,7 +2,8 @@
 import { execFile } from 'node:child_process'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it } from 'vitest'
@@ -159,6 +160,29 @@ it('marks an issue quiet after two days without tickets, drops it after a week, 
   expect(dry.stdout).not.toContain('`gone`')
   expect(readFileSync(join(root, 'known.json'), 'utf8')).toBe(before)
   expect(existsSync(join(root, 'sends.log'))).toBe(false)
+})
+
+it('checks the evidence of the replies whose worker Session is here, and lists those asserting what the worker never saw', async () => {
+  // aaaaaaaa's worker queried and was told 403; cccccccc's Session is not on this machine, so only one ticket is checked.
+  const session = join(root, 'sessions', 'p1', `worker-aaaaaaaa${'0'.repeat(24)}`)
+  mkdirSync(session, { recursive: true })
+  const events = [{ type: 'user/message', data: { content: [{ type: 'text', text: 'alarm card: provider-a failing' }] } },
+    { type: 'tool/call', data: { name: 'bash', arguments: '{"command":"dsh-oncall cls --query 403"}' } },
+    { type: 'tool/result', data: { message: { content: [{ type: 'text', text: '412 rows status 403' }] } } }]
+  writeFileSync(join(session, 'session.v4.jsonl'), events.map(event => JSON.stringify(event)).join('\n'))
+  execFileSync('zstd', ['-q', '--rm', join(session, 'session.v4.jsonl'), '-o', join(session, 'session.v4.jsonl.zstd')])
+  const base = await gateway({ ...answer, major: ['影响段写“其他客户不受影响”，但没有查过其他客户。'], minor: [] })
+  const result = await digest(base, '--sessions', join(root, 'sessions'), '--check', '5')
+  expect(result.code, result.stderr).toBe(0)
+  const check = seen.find(request => request.body.messages[0]!.content.startsWith('You audit an on-call agent'))!
+  expect(check.body.messages[0]!.content).toContain('[result] 412 rows status 403')
+  expect(check.body.messages[0]!.content).toContain('**结论**: 计费停用，403')
+  expect(seen.filter(request => request.body.messages[0]!.content.startsWith('You audit'))).toHaveLength(1)
+  const sent = readFileSync(join(root, 'sent.md'), 'utf8')
+  expect(sent).toContain('**证据抽查**（1 张给出原因的工单）：1 张结论缺证据或与证据矛盾；0 张只有细节问题。')
+  expect(sent).toContain('- p0 · provider-a 不可用（`aaaaaaaa`）：影响段写“其他客户不受影响”，但没有查过其他客户。')
+  expect(await digest(base, '--sessions', join(root, 'missing'))).toMatchObject({ code: 2 })
+  expect(await digest(base, '--check', '31')).toMatchObject({ code: 2 })
 })
 
 it('refuses a bad chat, a missing model or a non-loopback API before reading anything', async () => {
