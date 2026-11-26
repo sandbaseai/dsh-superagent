@@ -36,10 +36,10 @@ beforeEach(async () => {
       response.end(JSON.stringify({ setup: { accounts: { feishu: { appId: 'cli_ours' } } } })); return
     }
     if (url.pathname.endsWith('/decisions')) {
-      const items = [{ thread: 'feishu:oc_alerts:alert:k1', reason: [{ code: 'routed', values: { ticket: 'aaaaaaaa' } }] },
-        { thread: 'feishu:oc_alerts:alert:k2', reason: [{ code: 'said', values: { text: 'repeat' } }] },
-        { thread: 'feishu:oc_alerts:om_x', reason: [{ code: 'routed', values: { ticket: 'aaaaaaaa' } }] },
-        { thread: 'feishu:oc_alerts:alert:k3', reason: [{ code: 'routed', values: { ticket: 'bbbbbbbb' } }] }]
+      const items = [{ thread: 'feishu:oc_alerts:alert:k1', threadTitle: 'p1/Rule · a', at: new Date().toISOString(), reason: [{ code: 'routed', values: { ticket: 'aaaaaaaa' } }] },
+        { thread: 'feishu:oc_alerts:alert:k2', threadTitle: 'p2/Other · b', at: new Date().toISOString(), reason: [{ code: 'said', values: { text: 'repeat' } }] },
+        { thread: 'feishu:oc_alerts:om_x', at: new Date().toISOString(), reason: [{ code: 'routed', values: { ticket: 'aaaaaaaa' } }] },
+        { thread: 'feishu:oc_alerts:alert:k3', threadTitle: 'p1/Rule · c', at: new Date().toISOString(), reason: [{ code: 'routed', values: { ticket: 'bbbbbbbb' } }] }]
       const offset = Number(url.searchParams.get('offset'))
       response.writeHead(200, { 'content-type': 'application/json' })
       response.end(JSON.stringify({ items: items.slice(offset, offset + 2), next_offset: offset + 2 < items.length ? offset + 2 : null })); return
@@ -243,4 +243,19 @@ it('tells a fixed issue from an open one by the release time of the fix its tick
   expect((await digest(await gateway(quiet))).code).toBe(0)
   sent = latest()
   expect(sent).toMatch(/\*\*已修复\*\*\n- provider-a 计费停用：已修复：https:\/\/github\.com\/acme\/site\/pull\/9（.*），之后没有新工单/)
+})
+
+it('posts a short alarm summary with --brief: counts how alarms were handled, lists what needs a person, writes nothing', async () => {
+  const brief = { headline: '以已知问题为主', attention: [{ title: 'provider-a 计费停用', why: '所有请求 403，需要恢复计费', ticket_ids: ['aaaaaaaa'] }],
+    ongoing: [{ title: '旧链接 404', alarms: 7 }] }
+  const result = await digest(await gateway(brief), '--brief')
+  expect(result.code, result.stderr).toBe(0)
+  const prompt = seen[0]!.body.messages[0]!.content
+  expect(prompt).toContain('p1/Rule: 2')
+  expect(prompt).toContain('计费停用，仍是 403')
+  const sent = readFileSync(join(root, 'sent.md'), 'utf8')
+  expect(sent).toMatch(/^\*\*告警摘要 \d\d:\d\d–\d\d:\d\d\*\*（3 条告警：新开工单 0 · 复核 2 · 重复已跳过 0 · 恢复 0 · 其他 1）/)
+  expect(sent).toContain('**需要关注**\n- **provider-a 计费停用**：所有请求 403，需要恢复计费')
+  expect(sent).toContain('**持续中的已知问题**\n- 旧链接 404（7 条）')
+  expect(existsSync(join(root, 'known.json'))).toBe(false)
 })
