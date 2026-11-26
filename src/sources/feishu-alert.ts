@@ -85,14 +85,20 @@ export function looksLikeAlert(text: string): boolean {
   return first.includes(TENCENT) || /兜底页告警/.test(first) || /^\s*(?:告警策略|通知类型)\s*[:：]/m.test(text)
 }
 /**
- * Sets a listed bot's alert aside before assessment: its recovery notice (`alert_recovered`), and a repeat while a ticket on
- * its alert Thread is live (`alert_repeat`).
+ * Sets a listed bot's alert aside before assessment: its recovery notice (`alert_recovered`), a repeat while a ticket on
+ * its alert Thread is live (`alert_repeat`), and, when `windowHours` is set, a repeat of an alert a ticket on its Thread
+ * started within that many hours and finished without a person stopping it (`alert_analysed`), whose analysis covers it.
  */
-export function screenAlert(trigger: Trigger, tickets: Ticket[]): string | undefined {
+export function screenAlert(trigger: Trigger, tickets: Ticket[], windowHours = 0): string | undefined {
   const alert = trigger.meta.alert as Partial<FeishuAlert> | undefined
   if (typeof alert?.status !== 'string') return undefined
   if (alert.status === 'recovered') return 'alert_recovered'
-  return tickets.some(liveTicket) ? 'alert_repeat' : undefined
+  if (tickets.some(liveTicket)) return 'alert_repeat'
+  if (!windowHours) return undefined
+  const at = Date.parse(trigger.at)
+  const analysed = tickets.some(ticket => ticket.ended?.by !== 'human' && !ticket.origin.triggerIds.includes(trigger.id)
+    && at >= Date.parse(ticket.createdAt) && at - Date.parse(ticket.createdAt) < windowHours * 3600_000)
+  return analysed ? 'alert_analysed' : undefined
 }
 /** The words of an alarm object that name what it is about, such as a provider or model, lowercased. */
 const objectWords = (object: string | undefined): Set<string> =>

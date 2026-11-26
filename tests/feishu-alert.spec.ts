@@ -103,6 +103,17 @@ describe('screenAlert', () => {
       .toBeUndefined()
     expect(screenAlert({ ...notice('firing'), meta: {} }, [{ id: 'live' } as Ticket])).toBeUndefined()
   })
+  it('sets aside a repeat of an alert a ticket on its Thread analysed within the window, unless a person stopped it', () => {
+    const at = '2026-11-26T06:00:00.000Z'
+    const firing = { ...notice('firing'), id: 'now', at }
+    const done = (hoursAgo: number, by: 'executor' | 'human' = 'executor', origin = 'first') => ({ id: 'done', origin: { triggerId: origin, triggerIds: [origin] },
+      createdAt: new Date(Date.parse(at) - hoursAgo * 3600_000).toISOString(), ended: { at, by, outcome: 'completed' } }) as unknown as Ticket
+    expect(screenAlert(firing, [done(2)], 6)).toBe('alert_analysed')
+    expect(screenAlert(firing, [done(7)], 6)).toBeUndefined()
+    expect(screenAlert(firing, [done(2, 'human')], 6)).toBeUndefined()
+    expect(screenAlert(firing, [done(2, 'executor', 'now')], 6)).toBeUndefined()
+    expect(screenAlert(firing, [done(2)])).toBeUndefined()
+  })
 })
 
 describe('sameRuleTickets', () => {
