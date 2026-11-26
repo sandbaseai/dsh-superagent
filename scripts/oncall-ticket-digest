@@ -12,6 +12,9 @@ With --sessions (the DSH sessions directory on this machine), it also checks a s
 reads each worker's Session, read-only, and asks the model whether the reply is backed by what the worker saw, counting the
 replies that assert a cause, or that something is unaffected, without evidence.
 
+With --brief it posts a short summary of the last --hours (2 by default) instead: how the window's alarms were handled,
+what a person should look at, and which known issues kept firing. It reads the known list and writes nothing.
+
 Exit 0 posted (or printed with --dry-run), 1 the model, the management API or the post failed, 2 a bad argument.
 """
 
@@ -477,6 +480,81 @@ def evidence_markdown(checked):
     return lines + ['']
 
 
+BRIEF_PROMPT = """You write a short summary of the on-call alert chat for engineers who do not read every alarm.
+
+Below are, for the last {hours} hours: the alarm rules that fired and how often, the tickets the on-call agent opened or
+rechecked with the conclusion of each, and the known open issues from earlier days. Answer with one JSON object and nothing
+else:
+{{"attention": [{{"title": "short Chinese title naming the thing", "why": "one Chinese sentence: what is wrong and what a person
+  should do", "ticket_ids": ["..."]}}],
+ "ongoing": [{{"title": "short Chinese title of a known issue that kept firing", "alarms": number of its alarms in the window}}],
+ "headline": "one Chinese sentence on the window"}}
+
+attention lists only what a person must act on and that is new in this window or got worse: a real fault, a broken page,
+a quota, a certificate, a cause that changed. A false alarm, a known issue firing as before, a recovered blip or a client's
+own traffic is not attention; a known issue firing as before goes to ongoing. A ticket still being investigated (outcome
+open, no conclusion yet) is not attention by itself: the next summary has its conclusion. Keep attention to at most five items, the
+most urgent first, and say so plainly when there are none. Use only what the conclusions say; do not invent causes.
+
+Alarm rules (rule: firing alarms):
+{rules}
+
+Tickets:
+{tickets}
+
+Known issues:
+{known}
+"""
+
+
+def alarm_decisions(url, since):
+    """The decisions on alert Threads made since `since`, newest first, from the management API."""
+    found, offset = [], 0
+    while offset is not None:
+        listed = management(url, f'decisions?offset={offset}&limit={PAGE}')
+        items = listed.get('items') or []
+        for item in items:
+            if parse_time(item['at']) < since:
+                return found
+            if ':alert:' in str(item.get('thread', '')):
+                found.append(item)
+        offset = listed.get('next_offset')
+    return found
+
+
+def handling(decision):
+    """How an alarm was handled: new, recheck, repeat, recovered, timeout or other."""
+    reason = json.dumps(decision.get('reason') or [], ensure_ascii=False)
+    if decision.get('kind') == 'accept':
+        return 'new'
+    if decision.get('kind') == 'unavailable':
+        return 'timeout'
+    if '"routed"' in reason:
+        return 'recheck'
+    if 'alert_recovered' in reason:
+        return 'recovered'
+    if any(word in reason for word in ('alert_analysed', 'alert_repeat', '6-hour', 'Same alarm', 'Same incident')):
+        return 'repeat'
+    return 'other'
+
+
+def brief_markdown(answer, counts, hours, now):
+    stamp = now.astimezone(SHANGHAI)
+    start = (stamp - datetime.timedelta(hours=hours)).strftime('%H:%M')
+    total = sum(counts.values())
+    lines = [f'**告警摘要 {start}–{stamp:%H:%M}**（{total} 条告警：新开工单 {counts["new"]} · 复核 {counts["recheck"]} · '
+             f'重复已跳过 {counts["repeat"]} · 恢复 {counts["recovered"]}'
+             + (f' · 超时未判断 {counts["timeout"]}' if counts['timeout'] else '') + (f' · 其他 {counts["other"]}' if counts['other'] else '') + '）']
+    if answer.get('headline'):
+        lines.append(str(answer['headline'])[:300])
+    attention = [item for item in answer.get('attention') or [] if item.get('title')][:5]
+    lines += ['', '**需要关注**'] + ([f'- **{item["title"][:60]}**：{str(item.get("why", ""))[:200]}' for item in attention] or ['- 无'])
+    ongoing = [item for item in answer.get('ongoing') or [] if item.get('title')][:8]
+    if ongoing:
+        lines += ['', '**持续中的已知问题**'] + [f'- {item["title"][:60]}（{item.get("alarms", "?")} 条）' for item in ongoing]
+    return '\n'.join(lines)
+
+
 def post(lark, chat, text):
     with tempfile.TemporaryDirectory(prefix='ticket-digest-') as scratch:
         Path(scratch, 'digest.md').write_text(text)
@@ -492,7 +570,7 @@ def main():
                         help='the dsh-superagent management API on loopback (default http://127.0.0.1:3082)')
     parser.add_argument('--known', required=True, type=Path, help='the known-issues JSON; a .md beside it is written for workers')
     parser.add_argument('--chat', required=True, help='the Feishu chat id to post to')
-    parser.add_argument('--hours', type=int, default=24)
+    parser.add_argument('--hours', type=int)
     parser.add_argument('--credentials', default=os.path.expanduser('~/.dsh/.credentials.yaml'))
     parser.add_argument('--key-ref', default='ONCALL_LLM_API_KEY')
     parser.add_argument('--base-url', default=os.environ.get('ONCALL_LLM_BASE_URL', ''))
@@ -503,8 +581,11 @@ def main():
     parser.add_argument('--feedback-hours', type=int, default=48, help='count 👍/👎 on replies of the tickets of this many hours (0: none)')
     parser.add_argument('--sessions', default='', help='the DSH sessions directory, such as ~/.dsh/sessions, to check workers\' evidence')
     parser.add_argument('--check', type=int, default=10, help='how many tickets the evidence check reads (0: none)')
+    parser.add_argument('--brief', action='store_true', help='post the short alarm summary of the last --hours (default 2) instead')
     parser.add_argument('--dry-run', action='store_true', help='print the digest and the known list; post and write nothing')
     args = parser.parse_args()
+    if args.hours is None:
+        args.hours = 2 if args.brief else 24
     try:
         if not re.fullmatch(r'oc_[A-Za-z0-9]+', args.chat):
             raise Invalid('--chat must be a Feishu chat id (oc_...)')
@@ -524,6 +605,8 @@ def main():
         print(f'oncall-ticket-digest: {error}', file=sys.stderr)
         return 2
     now = now_utc()
+    if args.brief:
+        return brief(args, now)
     try:
         tickets = read_tickets(args.url, now - datetime.timedelta(hours=args.hours))
         known = json.loads(args.known.read_text()) if args.known.exists() else []
@@ -568,6 +651,44 @@ def main():
         args.known.write_text(json.dumps(known, ensure_ascii=False, indent=1) + '\n')
         args.known.with_suffix('.md').write_text(known_markdown(known, now, fixes))
         post(args.lark_cli, args.chat, text)
+    except (RuntimeError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as error:
+        print(f'oncall-ticket-digest: {error}', file=sys.stderr)
+        return 1
+    return 0
+
+
+def brief(args, now):
+    since = now - datetime.timedelta(hours=args.hours)
+    try:
+        decisions = alarm_decisions(args.url, since)
+        if not decisions:
+            print('oncall-ticket-digest: no alarms in the window; nothing posted')
+            return 0
+        counts = dict.fromkeys(('new', 'recheck', 'repeat', 'recovered', 'timeout', 'other'), 0)
+        rules = {}
+        for decision in decisions:
+            kind = handling(decision)
+            counts[kind] += 1
+            if kind != 'recovered':
+                rule = str(decision.get('threadTitle') or '').split(' · ')[0][:80] or '?'
+                rules[rule] = rules.get(rule, 0) + 1
+        tickets = read_tickets(args.url, since)
+        known = json.loads(args.known.read_text()) if args.known.exists() else []
+        shown = [{k: v for k, v in ticket.items() if k not in ('ref', 'created', 'summary')} for ticket in tickets]
+        prompt = BRIEF_PROMPT.format(hours=args.hours,
+                                     rules='\n'.join(f'{rule}: {n}' for rule, n in sorted(rules.items(), key=lambda item: -item[1])),
+                                     tickets=json.dumps(shown, ensure_ascii=False, indent=0),
+                                     known=json.dumps([{k: entry.get(k) for k in ('title', 'cause', 'needs_human', 'firstSeen')}
+                                                       for entry in known if entry.get('status') == 'open'], ensure_ascii=False))
+        text = ask(args.base_url, api_key(args.credentials, args.key_ref), args.model, prompt)
+        match = re.search(r'\{[\s\S]*\}', text)
+        if not match:
+            raise RuntimeError('the model answered no JSON object')
+        markdown = brief_markdown(json.loads(match.group(0)), counts, args.hours, now)
+        if args.dry_run:
+            print(markdown)
+            return 0
+        post(args.lark_cli, args.chat, markdown)
     except (RuntimeError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as error:
         print(f'oncall-ticket-digest: {error}', file=sys.stderr)
         return 1
