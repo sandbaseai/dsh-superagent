@@ -24,14 +24,17 @@ export function conclusionOf(summary: string): string | undefined {
   return text.length <= CONCLUSION_CHARS ? text : `${text.slice(0, CONCLUSION_CHARS)}…`
 }
 
-/** The newest completed ticket on the alarm's Thread created within the window before the alarm, other than one it started. */
+/**
+ * The newest ticket on the alarm's Thread created within the window before the alarm that ended without a person stopping
+ * it, other than one it started: the same test `screenAlert` sets the repeat aside by, so every repeat it skips is marked.
+ */
 export function analysedBy(ctx: Pick<SourceContext, 'threads' | 'tickets'>, trigger: Trigger, windowMs: number): Ticket | undefined {
   const ref = trigger.threads.find(thread => thread.source === SOURCE && isAlertThread(thread.id))
   const thread = ref && ctx.threads.get(threadKey(ref))
   if (!thread) return undefined
   const at = Date.parse(trigger.at)
   return thread.subscriptions.flatMap(id => { const ticket = ctx.tickets.get(id); return ticket ? [ticket] : [] })
-    .filter(ticket => ticket.ended?.outcome === 'completed' && !ticket.origin.triggerIds.includes(trigger.id)
+    .filter(ticket => !!ticket.ended && ticket.ended.by !== 'human' && !ticket.origin.triggerIds.includes(trigger.id)
       && Date.parse(ticket.createdAt) <= at && at - Date.parse(ticket.createdAt) < windowMs)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]
 }
