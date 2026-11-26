@@ -245,17 +245,38 @@ it('tells a fixed issue from an open one by the release time of the fix its tick
   expect(sent).toMatch(/\*\*已修复\*\*\n- provider-a 计费停用：已修复：https:\/\/github\.com\/acme\/site\/pull\/9（.*），之后没有新工单/)
 })
 
-it('posts a short alarm summary with --brief: counts how alarms were handled, lists what needs a person, writes nothing', async () => {
-  const brief = { headline: '以已知问题为主', attention: [{ title: 'provider-a 计费停用', why: '所有请求 403，需要恢复计费', ticket_ids: ['aaaaaaaa'] }],
-    ongoing: [{ title: '旧链接 404', alarms: 7 }] }
-  const result = await digest(await gateway(brief), '--brief')
+it('posts a short alarm summary with --brief: counts, then only attention items that cite a ticket and pass the review', async () => {
+  const brief = { headline: '以已知问题为主', ongoing: [{ title: '旧链接 404', alarms: 7 }], attention: [
+    { title: 'provider-a 计费停用', why: '所有请求 403，需要恢复计费', ticket_ids: ['aaaaaaaa'] },
+    { title: '旧链接 404 很多', why: '要人看', ticket_ids: ['cccccccc'] },
+    { title: '没有工单的猜测', why: '模型自己想的', ticket_ids: ['zzzzzzzz'] },
+    { title: '低置信度的计费', why: '可能要处理', ticket_ids: ['bbbbbbbb'] }] }
+  // The review keeps the first, drops the second, and doubts the fourth; the third cites no ticket and is never reviewed.
+  const verdicts = { verdicts: [{ index: 0, verdict: 'keep' }, { index: 1, verdict: 'drop' }, { index: 2, verdict: 'doubt' }] }
+  server = createServer((request, response) => {
+    let text = ''
+    request.on('data', chunk => { text += chunk })
+    request.on('end', () => {
+      const body = JSON.parse(text)
+      seen.push({ headers: request.headers, body })
+      const answer = body.messages[0].content.startsWith('You check a summary') ? verdicts : brief
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ content: [{ type: 'text', text: JSON.stringify(answer) }] }))
+    })
+  })
+  await new Promise<void>(resolve => server!.listen(0, '127.0.0.1', resolve))
+  const result = await digest(`http://127.0.0.1:${(server!.address() as AddressInfo).port}`, '--brief')
   expect(result.code, result.stderr).toBe(0)
-  const prompt = seen[0]!.body.messages[0]!.content
-  expect(prompt).toContain('p1/Rule: 2')
-  expect(prompt).toContain('计费停用，仍是 403')
+  expect(seen[0]!.body.messages[0]!.content).toContain('p1/Rule: 2')
+  const review = seen[1]!.body.messages[0]!.content
+  expect(review).toContain('计费停用，403')
+  expect(review).not.toContain('没有工单的猜测')
+  expect(result.stderr).toContain('2 of 4 attention items left out by the checks')
   const sent = readFileSync(join(root, 'sent.md'), 'utf8')
   expect(sent).toMatch(/^\*\*告警摘要 \d\d:\d\d–\d\d:\d\d\*\*（3 条告警：新开工单 0 · 复核 2 · 重复已跳过 0 · 恢复 0 · 其他 1）/)
-  expect(sent).toContain('**需要关注**\n- **provider-a 计费停用**：所有请求 403，需要恢复计费')
+  expect(sent).toContain('**需要关注**\n- **provider-a 计费停用**：所有请求 403，需要恢复计费（工单 `aaaaaaaa`）\n- **低置信度的计费**（待确认）：可能要处理（工单 `bbbbbbbb`）\n')
+  expect(sent).not.toContain('旧链接 404 很多')
+  expect(sent).not.toContain('没有工单的猜测')
   expect(sent).toContain('**持续中的已知问题**\n- 旧链接 404（7 条）')
   expect(existsSync(join(root, 'known.json'))).toBe(false)
 })
