@@ -4,7 +4,7 @@
  * alarm, answered or not, also gets a ✅ reaction, so each card in the chat shows it was handled.
  */
 import { key, latestReport, threadKey, type Ticket, type Trigger } from '../core/index.ts'
-import { isAlertThread, type FeishuAlert } from './feishu-alert.ts'
+import { covers, isAlertThread, type FeishuAlert } from './feishu-alert.ts'
 import { readFeishuLink } from './feishu-read.ts'
 import { feishuRef, SOURCE } from './feishu-trigger.ts'
 import type { SourceContext } from './host.ts'
@@ -25,18 +25,16 @@ export function conclusionOf(summary: string): string | undefined {
 }
 
 /**
- * The newest ticket on the alarm's Thread created within the window before the alarm that ended without a person stopping
- * it, other than one it started: the same test `screenAlert` sets the repeat aside by, so every repeat it skips is marked.
+ * The ticket on the alarm's Thread that finished analysing it last, among those `covers` accepts: the same test
+ * `screenAlert` sets the repeat aside by, so every repeat it skips is marked.
  */
 export function analysedBy(ctx: Pick<SourceContext, 'threads' | 'tickets'>, trigger: Trigger, windowMs: number): Ticket | undefined {
   const ref = trigger.threads.find(thread => thread.source === SOURCE && isAlertThread(thread.id))
   const thread = ref && ctx.threads.get(threadKey(ref))
   if (!thread) return undefined
-  const at = Date.parse(trigger.at)
   return thread.subscriptions.flatMap(id => { const ticket = ctx.tickets.get(id); return ticket ? [ticket] : [] })
-    .filter(ticket => !!ticket.ended && ticket.ended.by !== 'human' && !ticket.origin.triggerIds.includes(trigger.id)
-      && Date.parse(ticket.createdAt) <= at && at - Date.parse(ticket.createdAt) < windowMs)
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]
+    .filter(ticket => covers(ticket, trigger, windowMs))
+    .sort((a, b) => b.ended!.at.localeCompare(a.ended!.at))[0]
 }
 
 const clock = (at: string, brand: 'feishu' | 'lark') => new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false,
@@ -62,7 +60,7 @@ export async function repeatNotice(ctx: SourceContext, trigger: Trigger, config:
   // The link opens the earlier alarm's topic, where its analysis was posted; without it the notice names the time alone.
   const link = source ? await readFeishuLink(ctx.commands.withSignal(signal), source).catch(() => undefined) : undefined
   const conclusion = conclusionOf(latestReport(earlier)?.summary ?? '')
-  const time = clock(earlier.createdAt, brand)
+  const time = clock(earlier.ended!.at, brand)
   const lines = (conclusion: string | undefined) => (brand === 'lark'
     ? [`Same alarm as the one analysed at ${time} UTC; it is not investigated again within ${config.repeatWindowHours} h.`,
       ...conclusion ? [`**Earlier conclusion**: ${conclusion}`] : [], ...link ? [`[Full analysis](${link})`] : []]

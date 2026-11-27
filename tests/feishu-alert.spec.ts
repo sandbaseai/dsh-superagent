@@ -106,13 +106,23 @@ describe('screenAlert', () => {
   it('sets aside a repeat of an alert a ticket on its Thread analysed within the window, unless a person stopped it', () => {
     const at = '2026-11-26T06:00:00.000Z'
     const firing = { ...notice('firing'), id: 'now', at }
-    const done = (hoursAgo: number, by: 'executor' | 'human' = 'executor', origin = 'first') => ({ id: 'done', origin: { triggerId: origin, triggerIds: [origin] },
-      createdAt: new Date(Date.parse(at) - hoursAgo * 3600_000).toISOString(), ended: { at, by, outcome: 'completed' } }) as unknown as Ticket
+    const done = (hoursAgo: number, by: 'executor' | 'human' = 'executor', origin = 'first') => {
+      const createdAt = new Date(Date.parse(at) - hoursAgo * 3600_000).toISOString()
+      return { id: 'done', origin: { triggerId: origin, triggerIds: [origin] }, createdAt, ended: { at: createdAt, by, outcome: 'completed' } } as unknown as Ticket
+    }
     expect(screenAlert(firing, [done(2)], 6)).toBe('alert_analysed')
     expect(screenAlert(firing, [done(7)], 6)).toBeUndefined()
     expect(screenAlert(firing, [done(2, 'human')], 6)).toBeUndefined()
     expect(screenAlert(firing, [done(2, 'executor', 'now')], 6)).toBeUndefined()
     expect(screenAlert(firing, [done(2)])).toBeUndefined()
+  })
+  it('counts the window from when a resumed ticket last finished, not when it started', () => {
+    const at = '2026-11-27T01:14:00.000Z'
+    const firing = { ...notice('firing'), id: 'now', at }
+    const resumed = (endedHoursAgo: number) => ({ id: 'resumed', origin: { triggerId: 'first', triggerIds: ['first'] }, createdAt: '2026-11-25T11:57:00.000Z',
+      ended: { at: new Date(Date.parse(at) - endedHoursAgo * 3600_000).toISOString(), by: 'executor', outcome: 'completed' } }) as unknown as Ticket
+    expect(screenAlert(firing, [resumed(1)], 6)).toBe('alert_analysed')
+    expect(screenAlert(firing, [resumed(7)], 6)).toBeUndefined()
   })
 })
 

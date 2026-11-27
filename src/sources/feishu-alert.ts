@@ -85,9 +85,18 @@ export function looksLikeAlert(text: string): boolean {
   return first.includes(TENCENT) || /兜底页告警/.test(first) || /^\s*(?:告警策略|通知类型)\s*[:：]/m.test(text)
 }
 /**
+ * Whether `ticket`, started before `trigger`, finished without a person stopping it less than `windowMs` before it. The window
+ * counts from the ticket's latest end, since a ticket resumed on its Thread analyses the alert again each time it runs.
+ */
+export function covers(ticket: Ticket, trigger: Trigger, windowMs: number): boolean {
+  if (!ticket.ended || ticket.ended.by === 'human' || ticket.origin.triggerIds.includes(trigger.id)) return false
+  const at = Date.parse(trigger.at)
+  return at >= Date.parse(ticket.createdAt) && at - Date.parse(ticket.ended.at) < windowMs
+}
+/**
  * Sets a listed bot's alert aside before assessment: its recovery notice (`alert_recovered`), a repeat while a ticket on
  * its alert Thread is live (`alert_repeat`), and, when `windowHours` is set, a repeat of an alert a ticket on its Thread
- * started within that many hours and finished without a person stopping it (`alert_analysed`), whose analysis covers it.
+ * finished analysing within that many hours (see `covers`), whose analysis covers it (`alert_analysed`).
  */
 export function screenAlert(trigger: Trigger, tickets: Ticket[], windowHours = 0): string | undefined {
   const alert = trigger.meta.alert as Partial<FeishuAlert> | undefined
@@ -95,10 +104,7 @@ export function screenAlert(trigger: Trigger, tickets: Ticket[], windowHours = 0
   if (alert.status === 'recovered') return 'alert_recovered'
   if (tickets.some(liveTicket)) return 'alert_repeat'
   if (!windowHours) return undefined
-  const at = Date.parse(trigger.at)
-  const analysed = tickets.some(ticket => ticket.ended?.by !== 'human' && !ticket.origin.triggerIds.includes(trigger.id)
-    && at >= Date.parse(ticket.createdAt) && at - Date.parse(ticket.createdAt) < windowHours * 3600_000)
-  return analysed ? 'alert_analysed' : undefined
+  return tickets.some(ticket => covers(ticket, trigger, windowHours * 3600_000)) ? 'alert_analysed' : undefined
 }
 /** The words of an alarm object that name what it is about, such as a provider or model, lowercased. */
 const objectWords = (object: string | undefined): Set<string> =>
