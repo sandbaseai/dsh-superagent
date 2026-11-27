@@ -9,6 +9,7 @@ import { key, type AssessmentOutcome, type Mandate, type Policy, type PolicyEffe
   type Trigger, type ActorRef, type GateResult } from './core/index.ts'
 import { sameName } from './infra/text.ts'
 import { WORKER_COMMANDS } from './infra/environment.ts'
+import { parseCron, validTimeZone } from './cron.ts'
 
 export const RuleIdSchema = z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/)
 export const RuleMatchSchema = z.object({ rule_id: RuleIdSchema, reason: z.string().trim().min(1).max(500) }).strict()
@@ -97,6 +98,24 @@ export const ExecutorConfigSchema = z.object({
   prepare: z.string().max(LIMITS.prepareCommand).default(''),
   blockedCommands: z.array(CommandNameSchema).default([]),
 }).strict()
+const CronSchema = z.string().trim().superRefine((text, ctx) => {
+  try { parseCron(text) } catch (error) { ctx.addIssue({ code: 'custom', message: (error as Error).message }) }
+})
+/** A scheduled job: a shell command the host runs at the minutes `cron` names in `timeZone`. */
+export const ScheduleJobSchema = z.object({
+  id: z.string().regex(/^[a-z0-9][a-z0-9-]*$/).max(LIMITS.scheduleId),
+  name: z.string().trim().min(1).max(LIMITS.ruleName),
+  enabled: z.boolean().default(true),
+  cron: CronSchema,
+  timeZone: z.string().trim().refine(validTimeZone, 'Not an IANA time zone').default('UTC'),
+  command: z.string().trim().min(1).max(LIMITS.scheduleCommand),
+  timeoutMinutes: z.number().int().min(LIMITS.scheduleTimeoutMinutes.min).max(LIMITS.scheduleTimeoutMinutes.max).default(30),
+}).strict()
+export type ScheduleJob = z.infer<typeof ScheduleJobSchema>
+export const SchedulesConfigSchema = z.object({
+  jobs: z.array(ScheduleJobSchema).max(LIMITS.scheduleJobs)
+    .refine(jobs => new Set(jobs.map(job => job.id)).size === jobs.length, 'Duplicate job IDs').default([]),
+}).strict()
 export const SourceInstanceSchema = z.object({ enabled: z.boolean().default(true), config: z.record(z.string(), z.unknown()).default({}) }).strict()
 export const SettingsSchema = z.object({
   paused: z.boolean().default(false),
@@ -104,9 +123,10 @@ export const SettingsSchema = z.object({
   policy: PolicyConfigSchema.default(() => PolicyConfigSchema.parse({})),
   eval: EvalConfigSchema.default(() => EvalConfigSchema.parse({})),
   executor: ExecutorConfigSchema.default(() => ExecutorConfigSchema.parse({})),
+  schedules: SchedulesConfigSchema.default(() => SchedulesConfigSchema.parse({})),
 }).strict()
 export type Settings = z.infer<typeof SettingsSchema>
-export type SettingsBlock = 'policy' | 'eval' | 'executor' | `source:${string}`
+export type SettingsBlock = 'policy' | 'eval' | 'executor' | 'schedules' | `source:${string}`
 export type SettingsSave = SettingsBlock | 'pause'
 export type SettingsOrigin = 'panel' | 'tool' | 'sync'
 

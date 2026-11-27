@@ -99,3 +99,16 @@ it('records nothing for a pause that changes nothing, refuses a sync while setup
   vi.mocked(Setup.prototype.configured).mockRestore()
   expect(() => settings.block('source:x')).toThrow(new UserError('unknownBlock', { block: 'source:x' }))
 })
+
+it('saves scheduled jobs only from the panel, without a notice to the main Session, and reads them in the settings view', async () => {
+  h = await startRuntime()
+  const { settings, store, effects } = h.runtime
+  const jobs = [{ id: 'brief', name: 'Brief', cron: '5 12-21/3 * * *', timeZone: 'Asia/Shanghai', command: 'true' }]
+  await expect(settings.save('schedules', { jobs }, store.blockRevision('schedules'), 'tool')).rejects.toThrow(UserError)
+  expect(store.settings().schedules.jobs).toEqual([])
+  await settings.save('schedules', { jobs }, store.blockRevision('schedules'), 'panel')
+  expect(store.settings().schedules.jobs).toMatchObject([{ id: 'brief', enabled: true, timeoutMinutes: 30 }])
+  expect(store.blockRevision('schedules')).toBe(1)
+  expect(effects.pending('notice', 'settings:schedules')).toBe(false)
+  expect(h.runtime.schedules.view().jobs).toMatchObject([{ id: 'brief', running: false, runs: [] }])
+})

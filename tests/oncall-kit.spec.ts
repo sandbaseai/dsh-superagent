@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { Prompts, builtInBase, builtInParts, composeSkill, type PromptConfig } from '../src/app/prompts.ts'
 import { Store } from '../src/app/store.ts'
 import { LIMITS } from '../src/limits.ts'
-import { EvalConfigSchema, ExecutorConfigSchema, PolicyConfigSchema } from '../src/policy.ts'
+import { EvalConfigSchema, ExecutorConfigSchema, PolicyConfigSchema, SchedulesConfigSchema } from '../src/policy.ts'
 import { feishuKind } from '../src/sources/feishu.ts'
 
 const ROOT = join(import.meta.dirname, '..')
@@ -62,6 +62,18 @@ describe('the kit settings', () => {
     expect(EvalConfigSchema.parse(evaluation)).toEqual({ mode: 'observe', timeoutSeconds: 300, nearbyMinutes: 360, model: { provider: 'anthropic-gateway', model: 'claude-sonnet-5-5' } })
     expect(ExecutorConfigSchema.parse(executor)).toMatchObject({ model: { provider: 'anthropic-gateway', model: 'claude-opus-5-5' }, maxWorkers: 2,
       blockedCommands: expect.arrayContaining(['kubectl', 'curl', 'tccli']) })
+  })
+
+  it('saves the kit\'s scheduled jobs after the other blocks when it has settings/schedules.json', async () => {
+    const kit = join(scratch('oncall-kit-schedules-'), 'kit')
+    cpSync(KIT, kit, { recursive: true })
+    const jobs = [{ id: 'brief', name: 'Brief', cron: '5 12-21/3 * * *', timeZone: 'Asia/Shanghai', command: 'true' }]
+    writeFileSync(join(kit, 'settings', 'schedules.json'), JSON.stringify({ jobs }))
+    const result = await apply('--dry-run', '--kit', kit, ...ARGS)
+    const bodies = requests(result.stdout)
+    expect(bodies.map(([request]) => request)).toEqual(['PUT settings/source:feishu', 'PUT settings/policy', 'PUT settings/eval',
+      'PUT settings/executor', 'PUT settings/schedules', 'PUT prompts'])
+    expect(SchedulesConfigSchema.parse(value(bodies[4]![1])).jobs).toMatchObject(jobs)
   })
 
   it('takes the accept mode and models from the arguments', async () => {
