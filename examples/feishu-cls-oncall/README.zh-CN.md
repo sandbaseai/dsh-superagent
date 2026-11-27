@@ -307,7 +307,11 @@ Check dsh-superagent: run `scripts/dsh-superagent --profile superagent status` i
 
 ## 自动修复（可选）
 
-worker 确认一个靠改代码或配置就能解决的问题后，在分析回复末尾提议修复，写明问题、原因、要改什么和风险（“回复「修复」自动开 PR”）；群里任何名单内的人在话题里回复同意后，工单恢复，worker 才运行 `oncall-fix submit`：它在 SandBase Agents 上启动一个修复 Agent，由它在 GitHub 上开 PR；再由另一个审阅 Agent 读 PR，把阻塞问题写成 PR 评论，修复 Agent 按评论在同一分支上改，最多审阅两轮。审阅通过后由人看过、在话题里说「合并」再由 Agent 合并；配置了发布的仓库合并后自动发布生产（见准备第 5 步）。每一步需要人知道的结果都回复在告警所在的话题里，需要人处理时只 @ 发出「修复」或「合并」的那个人，不 @所有人。能改哪些仓库由 SandBase Agents 的 GitHub 授权决定，这个工具不另设名单；一张工单只发起一次。
+worker 确认一个靠改代码或配置就能解决的问题后，先用 `oncall-fix status --json` 查全部记录，按同仓库、同环境、相同根因和改动范围复用 `problem_key`，不混合不同环境或根因。先运行 `oncall-fix propose --repository <owner/name> --problem-key <key> --brief <file>` 保存为 `pending_confirmation`，再在分析回复末尾展示问题、原因、改动和风险（“回复「修复」自动开 PR”）；保存提议不会启动 Agent。设计提议同样先保存，加 `--kind design`。同一问题再次出现时，用相同仓库和 key 关联工单，保留原提议话题，不重复催同意。
+
+群里名单内的人在关联工单的话题里明确同意后，worker 才运行 `oncall-fix submit --repository <owner/name> --problem-key <key> --by <open_id>`；用户追加的约束可写进 brief，以 `--brief <file>` 随确认提交。旧的无 key `submit --repository ... --brief ... --by ...` 仍兼容。明确拒绝时才用 `dismiss --repository ... --problem-key ... --by ... --reason ...`，沉默不算拒绝。`tick` 在提议待确认 72 小时后首次提醒，此后间隔 7 天，总计最多两次。
+
+确认后在 SandBase Agents 上启动修复或设计 Agent 开 PR，再由另一个审阅 Agent 提阻塞问题，原 Agent 在同一分支修改，最多审阅两轮。审阅通过后由人看过、在话题里说「合并」再由 Agent 合并；RELEASES 配置的仓库仍在合并后自动发布生产（见准备第 5 步），不新增发布确认流程。结果回复到**原提议工单的话题**，可能与本次确认的话题不同；需要人处理时只 @ 发出请求的人。仓库须同时获得 GitHub 授权并列入 `REPOSITORIES`。
 
 准备：
 
@@ -323,7 +327,9 @@ worker 确认一个靠改代码或配置就能解决的问题后，在分析回�
 5. 可选，合并后自动发布生产：再加 `RELEASES=owner/name:.github/workflows/deploy.yaml`（仓库须在 `REPOSITORIES` 里，workflow 接受输入 `tag`，即 `v*`）。在 Console 给 GitHub 连接的工具上限加 `github_create_tag` 和 `github_dispatch_workflow`，把该 workflow 加进白名单（分支 main），并在修复 Agent 上显式勾选这两个工具。`oncall-fix merge` 合并成功后自动发布；人在 GitHub 上自己合并的，在话题里说「发布」，worker 运行 `oncall-fix release`。发布由修复 Agent 新开一个克隆了该仓库的会话完成：在 main 最新提交上打下一个 `vMAJOR.MINOR.PATCH`，以这个 tag 触发 workflow，等部署结束，结果回复到话题。发布的是整个 main，别人已合并还没发布的改动会一起上线；合并已包含在最新 tag 里时只回复“已上线”。PR 须以 merge commit 合并（squash 后原提交不在 main 上，会拒绝发布）。
 6. 可选，合并后要人去控制台手动导入的文件（比如告警规则组）：加 `CONSOLE_FILES=owner/name:路径=https://控制台页面,...`，每个文件一项。`oncall-fix merge` 会让 Agent 在合并前报告 PR 改了哪些文件；合并回复里 @ 说「合并」的人，列出改到的文件和对应的控制台页面，请他用 main 上的文件整组替换。Agent 没报告文件时，列出该仓库配置的全部文件。控制台地址含实例 id，只写在 `fix.env` 里。
 
-`oncall-fix status` 列出所有修复、所处阶段和发布的 tag；工单日报会统计过去 48 小时发起的修复，并列出等人合并和需要人看的 PR。
+`oncall-fix status --json` 可读取全部提议和修复状态。工单日报除近期修复外，还跨时间窗保留待确认、待合并、待发布、待验证或验证失败等待办，不因创建时间较早而遗漏。
+
+排查或后续查询发现匹配的修复已合并/发布时，worker 用只读查询核对目标环境的版本、原故障路径及发布后的日志或指标，把实际查询、时间窗、样本和结论写入证据文件，再运行 `oncall-fix verify --repository <owner/name> --problem-key <key> --result passed|failed --evidence <file>` 记录验证。仅凭发布成功或没有新告警不能判通过；证据不足时保持待验证，并说明未确认项。`propose`、`verify` 只做本地记账，不授权修改系统或发布。`tick` 推进流程和提醒，不会自动唤起 worker 做发布后验证，也不保证自动验证回调。
 
 ## 故障排查
 

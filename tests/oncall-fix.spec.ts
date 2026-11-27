@@ -78,6 +78,251 @@ runpy.run_path(${JSON.stringify(SCRIPT)}, run_name='__main__')`, ...args], { tim
 const tick = () => fix('tick', '--url', panelUrl, '--lark-cli', join(root, 'lark'))
 const replies = () => existsSync(join(root, 'replies.md')) ? readFileSync(join(root, 'replies.md'), 'utf8').split('\n---\n').filter(Boolean) : []
 const stage = () => JSON.parse(readFileSync(join(root, 'state.json'), 'utf8'))[TICKET]
+const records = () => JSON.parse(readFileSync(join(root, 'state.json'), 'utf8'))
+const proposal = () => Object.values(records())[0] as Record<string, any>
+const propose = (...args: string[]) => fix('propose', '--repository', 'acme/site', '--problem-key', 'photo-404', '--brief', join(root, 'brief.md'), ...args)
+function patchProposal(patch: Record<string, unknown>) {
+  const all = records(); Object.assign(Object.values(all)[0]!, patch)
+  writeFileSync(join(root, 'state.json'), JSON.stringify(all))
+}
+const ago = (hours: number) => new Date(Date.now() - hours * 3600_000).toISOString()
+const OTHER = '12345678abcdef00'
+
+it('persists and deduplicates proposals by repository and explicit key without credentials or Agents', async () => {
+  rmSync(join(root, 'fix.env'))
+  expect(await propose()).toMatchObject({ code: 0 })
+  const original = proposal()
+  expect(original).toMatchObject({ stage: 'pending_confirmation', ticket: TICKET, tickets: [TICKET], problem_key: 'photo-404' })
+  writeFileSync(join(root, 'brief.md'), 'Another observation of the same problem, which must not replace the original evidence or brief.')
+  expect(await propose('--repository', 'ACME/SITE', '--ticket', OTHER)).toMatchObject({ code: 0 })
+  await propose('--ticket', OTHER)
+  expect(proposal()).toMatchObject({ tickets: [TICKET, OTHER], brief: original.brief, created: original.created })
+  expect(Object.keys(records())).toHaveLength(1)
+  await propose('--repository', 'acme/admin')
+  await propose('--problem-key', 'other-404')
+  expect(Object.keys(records())).toHaveLength(3)
+  expect(await fix('status', '--json')).toMatchObject({ code: 0, stdout: expect.stringContaining('pending_confirmation') })
+  expect(sessions.size).toBe(0)
+})
+
+it('accepts consent on an associated ticket, preserves the original thread, and follows configured automatic releases after explicit merge', async () => {
+  withReleases()
+  await propose(); await propose('--ticket', OTHER)
+  const saved = proposal()
+  expect(await fix('submit', '--ticket', OTHER)).toMatchObject({ code: 2 })
+  expect(await fix('submit', '--ticket', OTHER, '--by', 'ou_alice')).toMatchObject({ code: 0 })
+  expect(proposal()).toMatchObject({ stage: 'fixing', brief: saved.brief, ticket: TICKET, confirmed_ticket: OTHER, tickets: [TICKET, OTHER] })
+  expect(sessions.get('ses_1')!.input).toContain(`On-call ticket: ${TICKET}`)
+  expect(await fix('submit', '--by', 'ou_alice')).toMatchObject({ code: 2 })
+  expect(await fix('submit', '--ticket', OTHER, '--by', 'ou_alice')).toMatchObject({ code: 2 })
+  expect(sessions.size).toBe(1)
+  const requested: string[] = []
+  panel.on('request', request => requested.push(request.url!))
+  finish('ses_1', answer('Opened #7'), opened(7)); await tick()
+  finish('ses_2', review('approve', '通过')); await tick()
+  expect(proposal().stage).toBe('ready')
+  expect(sessions.get('ses_1')!.events).toHaveLength(0)
+  expect(replies().at(-1)).toContain('合并后自动发布生产。')
+  expect(await fix('merge', '--ticket', OTHER, '--by', 'ou_alice')).toMatchObject({ code: 0 })
+  finish('ses_1', answer('Merged'), mergedBy(7)); await tick()
+  expect(proposal().stage).toBe('releasing')
+  expect(sessions.size).toBe(3)
+  expect(replies().at(-1)).toContain('开始发布生产')
+  expect(requested.every(path => path.endsWith(`/tickets/${TICKET}`))).toBe(true)
+  expect(await fix('release', '--ticket', OTHER, '--by', 'ou_alice')).toMatchObject({ code: 2 })
+  finish('ses_3', answer('Released'), runOf('99', 'success'), dispatched('99'), tagged('v1.2.3')); await tick()
+  expect(proposal().stage).toBe('released')
+})
+
+it('refuses ambiguous proposals and accepts a validated updated brief with consent while retaining the proposed brief', async () => {
+  await propose('--kind', 'design')
+  const original = proposal().brief
+  await propose('--problem-key', 'other', '--kind', 'design')
+  expect(await fix('submit', '--by', 'ou_alice')).toMatchObject({ code: 2 })
+  const path = join(root, 'different.txt')
+  const updated = 'Confirmed constraints: only design the redirect for this route, preserve other routes, and include regression coverage.'
+  writeFileSync(path, updated)
+  expect(await fix('submit', '--problem-key', 'photo-404', '--brief', path)).toMatchObject({ code: 2 })
+  expect(await fix('submit', '--problem-key', 'photo-404', '--kind', 'fix', '--by', 'ou_alice', '--brief', path)).toMatchObject({ code: 2 })
+  for (const invalid of ['short', 'x'.repeat(12001)]) {
+    writeFileSync(path, invalid)
+    expect(await fix('submit', '--problem-key', 'photo-404', '--by', 'ou_alice', '--brief', path)).toMatchObject({ code: 2 })
+    expect(proposal().brief).toBe(original)
+  }
+  expect(sessions.size).toBe(0)
+  writeFileSync(path, updated)
+  expect(await fix('submit', '--problem-key', 'photo-404', '--by', 'ou_alice', '--brief', path)).toMatchObject({ code: 0 })
+  expect(byAgent('agt_dev')).toHaveLength(1)
+  expect(proposal()).toMatchObject({ kind: 'design', brief: updated, proposed_brief: original, by: 'ou_alice' })
+  expect(sessions.get('ses_1')!.input).toContain(updated)
+  expect(await propose('--kind', 'design')).toMatchObject({ code: 0 })
+  expect(proposal()).toMatchObject({ brief: updated, proposed_brief: original })
+})
+
+it('allows a new design after a confirmed fix opens no PR, while preserving request limits', async () => {
+  await propose(); await propose('--ticket', OTHER)
+  await fix('submit', '--by', 'ou_alice')
+  const submitDesign = () => fix('submit', '--ticket', OTHER, '--repository', 'acme/site', '--kind', 'design', '--brief', join(root, 'brief.md'))
+  expect(await submitDesign()).toMatchObject({ code: 2, stdout: expect.stringContaining('in progress') })
+  finish('ses_1', answer('This needs a design decision; no PR opened.')); await tick()
+  expect(proposal().stage).toBe('no_pr')
+  expect(await fix('submit', '--problem-key', 'photo-404', '--kind', 'design', '--brief', join(root, 'brief.md'), '--by', 'ou_alice'))
+    .toMatchObject({ code: 2, stderr: expect.stringContaining('already submitted or dismissed') })
+  expect(await submitDesign()).toMatchObject({ code: 0 })
+  expect(byAgent('agt_dev')).toHaveLength(1)
+  expect(proposal().stage).toBe('no_pr')
+  expect(await fix('submit', '--repository', 'acme/site', '--kind', 'fix', '--brief', join(root, 'brief.md')))
+    .toMatchObject({ code: 2, stdout: expect.stringContaining('already has a fix') })
+})
+
+it.each(['ready', 'merged', 'released', 'needs_human', 'no_pr', 'failed', 'release_failed', 'dismissed'])(
+  'never confirms an explicit problem key in stage %s, even with a new kind and brief', async stage => {
+    await propose(); patchProposal({ stage })
+    expect(await fix('submit', '--problem-key', 'photo-404', '--kind', 'design', '--brief', join(root, 'brief.md'), '--by', 'ou_alice'))
+      .toMatchObject({ code: 2, stderr: expect.stringContaining('already submitted or dismissed') })
+    expect(proposal().stage).toBe(stage)
+    expect(sessions.size).toBe(0)
+  })
+
+it('excludes pending and dismissed proposals from legacy request limits without executing them', async () => {
+  await propose()
+  await propose('--problem-key', 'declined')
+  await fix('dismiss', '--problem-key', 'declined', '--by', 'ou_alice', '--reason', 'not needed')
+  await propose('--problem-key', 'another-pending')
+  const submitDesign = () => fix('submit', '--repository', 'acme/site', '--kind', 'design', '--brief', join(root, 'brief.md'))
+  for (let n = 1; n <= 3; n++) {
+    expect(await submitDesign()).toMatchObject({ code: 0 })
+    finish(`ses_${n}`, answer('No design PR opened.')); await tick()
+  }
+  expect(await submitDesign()).toMatchObject({ code: 2, stdout: expect.stringContaining('already had 3 requests') })
+  expect(Object.values(records()).filter((entry: any) => entry.stage === 'pending_confirmation')).toHaveLength(2)
+  expect(Object.values(records()).filter((entry: any) => entry.stage === 'dismissed')).toHaveLength(1)
+  expect(sessions.size).toBe(3)
+})
+
+it('retries failed reminders, only counts successful original-thread replies, and caps them at two seven days apart', async () => {
+  await propose()
+  patchProposal({ created: ago(71) })
+  await tick(); expect(replies()).toHaveLength(0)
+  patchProposal({ created: ago(73) })
+  const lark = readFileSync(join(root, 'lark'), 'utf8')
+  writeFileSync(join(root, 'lark'), '#!/bin/sh\nexit 1\n')
+  expect(await tick()).toMatchObject({ code: 1 })
+  expect(proposal()).toMatchObject({ stage: 'pending_confirmation', reminder_count: 0 })
+  expect(proposal().reminded_at).toBeUndefined()
+  writeFileSync(join(root, 'lark'), lark)
+  expect(await tick()).toMatchObject({ code: 0 })
+  expect(proposal()).toMatchObject({ reminder_count: 1, reminded_at: expect.any(String) })
+  await tick(); expect(replies()).toHaveLength(1)
+  patchProposal({ reminded_at: ago(167) })
+  await tick(); expect(replies()).toHaveLength(1)
+  patchProposal({ reminded_at: ago(169) })
+  await tick(); expect(replies()).toHaveLength(2)
+  patchProposal({ reminded_at: ago(400) })
+  await tick(); expect(replies()).toHaveLength(2)
+  expect(proposal().reminder_count).toBe(2)
+  expect(replies().join('')).not.toMatch(/<at|@all|@所有人/)
+  expect(sessions.size).toBe(0)
+})
+
+it('does not count a reminder when the ticket has no Feishu topic', async () => {
+  await propose(); patchProposal({ created: ago(73) })
+  panel.removeAllListeners('request')
+  panel.on('request', (_request, response) => response.end(JSON.stringify({ channels: [] })))
+  expect(await tick()).toMatchObject({ code: 0 })
+  expect(proposal().reminder_count).toBe(0)
+  expect(proposal().reminded_at).toBeUndefined()
+})
+
+it('dry-run never changes state, contacts APIs or starts review/release sessions, even without credentials', async () => {
+  withReleases(); await ready(); await fix('merge')
+  finish('ses_1', answer('Merged'), mergedBy(7))
+  await propose('--ticket', OTHER)
+  const all = records()
+  for (const entry of Object.values(all) as Record<string, any>[]) if (entry.problem_key) entry.created = ago(73)
+  writeFileSync(join(root, 'state.json'), JSON.stringify(all))
+  const before = readFileSync(join(root, 'state.json'), 'utf8')
+  const beforeReplies = replies()
+  let requests = 0
+  agents.on('request', () => { requests++ }); panel.on('request', () => { requests++ })
+  rmSync(join(root, 'fix.env'))
+  expect(await fix('tick', '--dry-run')).toMatchObject({ code: 0, stdout: expect.stringContaining('would reply') })
+  expect(readFileSync(join(root, 'state.json'), 'utf8')).toBe(before)
+  expect(requests).toBe(0); expect(sessions.size).toBe(2); expect(replies()).toEqual(beforeReplies)
+  rmSync(join(root, 'state.json')); rmSync(join(root, 'state.lock'))
+  expect(await fix('tick', '--dry-run')).toMatchObject({ code: 0 })
+  expect(existsSync(join(root, 'state.json'))).toBe(false)
+  expect(existsSync(join(root, 'state.lock'))).toBe(false)
+})
+
+it('dismisses only pending proposals with explicit consent, never reopens them or reminds them', async () => {
+  await propose(); await propose('--ticket', OTHER)
+  rmSync(join(root, 'fix.env'))
+  expect(await fix('dismiss', '--reason', '暂不处理')).toMatchObject({ code: 2 })
+  expect(await fix('dismiss', '--by', 'ou_alice', '--reason', ' ')).toMatchObject({ code: 2 })
+  expect(await fix('dismiss', '--ticket', OTHER, '--by', 'ou_alice', '--reason', '暂不处理')).toMatchObject({ code: 0 })
+  await propose()
+  expect(proposal()).toMatchObject({ stage: 'dismissed', dismissed_by: 'ou_alice', reason: '暂不处理' })
+  expect(await fix('dismiss', '--by', 'ou_alice', '--reason', 'again')).toMatchObject({ code: 2 })
+  expect(await fix('tick', '--dry-run')).toMatchObject({ code: 0, stdout: '' })
+})
+
+it('records evidence and verification history only for merged/released work, with failures still needing attention', async () => {
+  await propose(); rmSync(join(root, 'fix.env'))
+  const evidence = join(root, 'evidence.txt')
+  writeFileSync(evidence, 'Request /free-tools/photo-restoration still returned HTTP 404 at 10:00 UTC.')
+  const verify = (result: string) => fix('verify', '--result', result, '--evidence', evidence)
+  expect(await verify('failed')).toMatchObject({ code: 2 })
+  patchProposal({ stage: 'merged' })
+  expect(await verify('failed')).toMatchObject({ code: 0 })
+  expect(proposal()).toMatchObject({ stage: 'merged', needs_attention: true, verification: { result: 'failed', evidence: readFileSync(evidence, 'utf8') } })
+  expect(await fix('dismiss', '--by', 'ou_alice', '--reason', 'done')).toMatchObject({ code: 2 })
+  patchProposal({ stage: 'released' })
+  writeFileSync(evidence, 'Checked deployed v1.2.3: redirect returns 302 and target returns 200.')
+  expect(await verify('passed')).toMatchObject({ code: 0 })
+  expect(proposal()).toMatchObject({ stage: 'released', needs_attention: false, verification: { result: 'passed', stage: 'released' } })
+  expect(proposal().verifications).toHaveLength(2)
+  writeFileSync(evidence, ' ')
+  expect(await verify('passed')).toMatchObject({ code: 2 })
+  expect(await verify('unknown')).toMatchObject({ code: 2 })
+  expect(proposal().verifications).toHaveLength(2)
+})
+
+it('serializes concurrent proposals and consent without losing tickets or starting duplicate sessions', async () => {
+  const results = await Promise.all([propose(), propose('--ticket', OTHER)])
+  expect(results.map(result => result.code)).toEqual([0, 0])
+  expect(Object.keys(records())).toHaveLength(1)
+  expect(proposal().tickets.sort()).toEqual([TICKET, OTHER].sort())
+  const submits = await Promise.all([fix('submit', '--by', 'ou_alice'), fix('submit', '--ticket', OTHER, '--by', 'ou_bob')])
+  expect(submits.map(result => result.code).sort()).toEqual([0, 2])
+  expect(sessions.size).toBe(1)
+})
+
+it('leaves a failed Agent submission pending and can retry it without losing the brief', async () => {
+  await propose()
+  const before = readFileSync(join(root, 'state.json'), 'utf8')
+  const handlers = agents.listeners('request')
+  agents.removeAllListeners('request')
+  agents.on('request', (_request, response) => { response.writeHead(503); response.end() })
+  expect(await fix('submit', '--by', 'ou_alice')).toMatchObject({ code: 1 })
+  expect(readFileSync(join(root, 'state.json'), 'utf8')).toBe(before)
+  agents.removeAllListeners('request')
+  for (const handler of handlers) agents.on('request', handler as Parameters<Server['on']>[1])
+  expect(await fix('submit', '--by', 'ou_alice')).toMatchObject({ code: 0 })
+  expect(proposal().stage).toBe('fixing')
+  expect(sessions.size).toBe(1)
+})
+
+it('validates proposal inputs without creating state or requiring credentials', async () => {
+  rmSync(join(root, 'fix.env'))
+  for (const args of [['--repository', 'bad'], ['--ticket', 'not-ticket'], ['--problem-key', ''], ['--problem-key', 'bad key'], ['--problem-key', 'a'.repeat(201)]]) {
+    expect(await propose(...args)).toMatchObject({ code: 2 })
+  }
+  writeFileSync(join(root, 'brief.md'), 'short')
+  expect(await propose()).toMatchObject({ code: 2 })
+  expect(existsSync(join(root, 'state.json'))).toBe(false)
+  expect(sessions.size).toBe(0)
+})
 
 it('starts one fix Session per ticket with the configured gateway, and refuses a second', async () => {
   const first = await fix('submit', '--repository', 'acme/site', '--brief', join(root, 'brief.md'))
@@ -240,6 +485,69 @@ async function ready() {
   finish(stage().review_session, review('approve', '通过')); await tick()
   expect(stage().stage).toBe('ready')
 }
+
+it.each(['merge', 'release'])('selects %s by repository when associated tickets have the same PR number across repositories', async command => {
+  await ready()
+  await fix('submit', '--ticket', OTHER, '--repository', 'acme/admin', '--brief', join(root, 'brief.md'))
+  const adminOpened = called('github_open_pull_request', { pr_url: 'https://github.com/acme/admin/pull/7', pr_number: 7 })
+  finish('ses_3', answer('Opened admin #7.'), adminOpened); await tick()
+  finish('ses_4', review('approve', 'Approved')); await tick()
+  const associated = 'deadbeef12345678'
+  const all = records()
+  all[TICKET].tickets = [TICKET, associated]
+  all[OTHER].tickets = [OTHER, associated]
+  writeFileSync(join(root, 'state.json'), JSON.stringify(all))
+  withReleases()
+  const beforeKeys = [...keys]
+  expect(await fix(command, '--ticket', associated, '--pr', '7'))
+    .toMatchObject({ code: 2, stdout: expect.stringContaining('--repository owner/name and --pr NUMBER') })
+  expect(await fix(command, '--ticket', associated, '--pr', '7', '--repository', 'bad'))
+    .toMatchObject({ code: 2, stderr: expect.stringContaining('--repository must be owner/name') })
+  expect(await fix(command, '--ticket', associated, '--pr', '7', '--repository', 'acme/missing')).toMatchObject({ code: 2 })
+  expect(keys).toEqual(beforeKeys)
+  expect(await fix(command, '--ticket', associated, '--pr', '7', '--repository', 'ACME/SITE')).toMatchObject({ code: 0 })
+  expect(records()[OTHER].stage).toBe('ready')
+  expect(sessions.get('ses_3')!.events).toHaveLength(0)
+  if (command === 'merge') {
+    expect(stage().stage).toBe('merging')
+    expect(sessions.get('ses_1')!.events.at(-1)).toContain('repository_id of acme/site')
+    expect(sessions.size).toBe(4)
+  } else {
+    expect(stage().stage).toBe('releasing')
+    expect(sessions.get('ses_5')!.workspace).toEqual({ repository_id: '4242' })
+    expect(sessions.get('ses_5')!.input).toContain('of acme/site is merged')
+  }
+})
+
+it.each(['passed', 'failed'])('invalidates a pre-release %s verification while preserving history and binding new checks to the release', async result => {
+  await ready(); await fix('merge')
+  finish('ses_1', answer('Merged.'), mergedBy(7)); await tick()
+  const evidence = join(root, 'evidence.txt')
+  writeFileSync(evidence, 'Checked the merged route before deployment.')
+  const verify = (value: string) => fix('verify', '--result', value, '--evidence', evidence, '--by', 'ou_alice')
+  expect(await verify(result)).toMatchObject({ code: 0 })
+  const previous = stage().verification
+  expect(previous).toMatchObject({ result, stage: 'merged', merge_sha: 'a'.repeat(40), release_tag: null })
+  withReleases()
+  expect(await fix('release')).toMatchObject({ code: 0 })
+  expect(stage().verification).toBeUndefined()
+  expect(stage().needs_attention).toBeUndefined()
+  expect(stage().verifications).toEqual([previous])
+  expect(await verify('passed')).toMatchObject({ code: 2 })
+  if (result === 'passed') {
+    finish('ses_3', answer('Released.'), runOf('99', 'success'), dispatched('99'), tagged('v1.2.3'))
+  } else {
+    finish('ses_3', answer('{"already_released": "v1.2.3"}'))
+  }
+  await tick()
+  expect(stage().stage).toBe('released')
+  expect(stage().verification).toBeUndefined()
+  expect(await fix('status')).toMatchObject({ code: 0, stdout: expect.not.stringContaining('verification=passed') })
+  writeFileSync(evidence, 'Checked deployed v1.2.3: redirect and destination both work.')
+  expect(await verify('passed')).toMatchObject({ code: 0 })
+  expect(stage().verification).toMatchObject({ result: 'passed', stage: 'released', merge_sha: 'a'.repeat(40), release_tag: 'v1.2.3' })
+  expect(stage().verifications).toEqual([previous, stage().verification])
+})
 
 it('releases a fix it merged: a new Session with the repository cloned tags main, dispatches the workflow and reports the run', async () => {
   withReleases(); await ready()
