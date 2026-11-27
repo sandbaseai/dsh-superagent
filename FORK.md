@@ -18,6 +18,7 @@ They do not depend on the on-call kit and would suit upstream as they are.
 | A candidate carries the Thread's recent Decisions, and the nearby Tickets of the same Source (`eval.nearbyMinutes`) | `src/core/evals.ts`, `src/core/ports.ts`, `src/app/assessment.ts` | #1, #7, #13 |
 | A reply may attach files from its Ticket's directory (`SourceChannel.send` gets the directory) | `src/sources/kind.ts`, `src/sources/registry.ts`, `src/app/outbox.ts` | #19 |
 | `SourceKind.screen`: a Source sets its bots' messages aside before assessment with its own reason code | `src/sources/kind.ts`, `src/sources/registry.ts`, `src/core/ports.ts`, `src/policy.ts` | #21 |
+| Scheduled jobs: the `schedules` settings block, the scheduler, the `schedules` health entry and the Schedule tab | `src/cron.ts`, `src/app/schedules.ts`, `src/policy.ts`, `src/app/settings.ts`, `src/app/runtime.ts`, `src/app/http.ts`, `src/client/schedule.tsx` | |
 | CI, ruff for the Python scripts | `.github/workflows/ci.yml`, `pyproject.toml` | #22 |
 | The deploy script, and the hourly health check | `scripts/dsh-superagent-deploy`, `scripts/oncall-health` | #2, #3, #6, #23, #26 |
 

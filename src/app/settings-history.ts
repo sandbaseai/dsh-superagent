@@ -9,7 +9,7 @@ type SourceSettings = SettingsVersion['settings']['sources'][string]
 export type SettingsChangeCode = 'ruleAdded' | 'ruleRenamed' | 'ruleInstruction' | 'ruleEnabled' | 'ruleDisabled' | 'ruleRemoved'
   | 'sourceEnabled' | 'sourceDisabled' | 'sourceField' | 'sourceRowsAdded' | 'sourceRowsRemoved' | 'sourceRowsChanged' | 'sourceAdmission'
   | 'mode' | 'timeout' | 'evalModel' | 'executorModel' | 'maxWorkers' | 'paused' | 'resumed' | 'executionDirectory' | 'prepareCommand'
-  | 'blockedCommands'
+  | 'blockedCommands' | 'jobAdded' | 'jobChanged' | 'jobRemoved'
 /** A single settings diff entry rendered by the panel using `change.<code>` and field labels from the Source listing. */
 export interface SettingsChange {
   code: SettingsChangeCode; items?: string[]; from?: string | number | boolean; to?: string | number | boolean; name?: string; source?: string
@@ -72,6 +72,15 @@ function settingsChanges(before: SettingsVersion['settings'], after: SettingsVer
   if (before.executor.prepare !== after.executor.prepare) changes.push({ code: 'prepareCommand' })
   if (!same(before.executor.blockedCommands, after.executor.blockedCommands)) changes.push({ code: 'blockedCommands', from: before.executor.blockedCommands.join(' '), to: after.executor.blockedCommands.join(' ') })
   for (const id of new Set([...Object.keys(before.sources), ...Object.keys(after.sources)])) changes.push(...sourceChanges(id, before.sources[id], after.sources[id], sources))
+  // Revisions saved before scheduled jobs existed have no `schedules`.
+  const jobs = (settings: SettingsVersion['settings']) => (settings.schedules as SettingsVersion['settings']['schedules'] | undefined)?.jobs ?? []
+  const old = jobs(before), next = jobs(after)
+  for (const job of next) {
+    const previous = old.find(item => item.id === job.id)
+    if (!previous) changes.push({ code: 'jobAdded', name: job.name })
+    else if (!same(previous, job)) changes.push({ code: 'jobChanged', name: job.name })
+  }
+  for (const job of old) if (!next.some(item => item.id === job.id)) changes.push({ code: 'jobRemoved', name: job.name })
   return changes
 }
 /** Compute changes between two revisions, returning null if a historical revision fails current source schema validation. */

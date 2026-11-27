@@ -2,6 +2,7 @@
 import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller/types'
 import type { PromptConfig, Prompts } from './prompts.ts'
 import type { PromptsView, StateView, TicketPageView } from './http.ts'
+import type { Schedules } from './schedules.ts'
 import type { HistoryView } from './settings-history.ts'
 import type { LiveView } from './views/live.ts'
 import type { OverviewView } from './views/overview.ts'
@@ -39,6 +40,8 @@ export interface Api {
   'POST executor/pause': { body: { paused: boolean }; response: { paused: boolean } }
   'PUT settings/:block': { body: { value: unknown; revision: number }; response: { revision: number; restarting: boolean } }
   'GET policy/history': { response: HistoryView }
+  'GET schedules': { response: ReturnType<Schedules['view']> }
+  'POST schedules/:id/run': { response: { started: true } }
   'POST policy-sync/:id': { response: { policy: unknown } }
   'POST setup/check': { response: { restarting: true } }
   'GET models': { response: ModelCatalog }

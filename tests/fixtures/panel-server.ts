@@ -13,7 +13,7 @@ import type { DroppedReply, HistoryView, Problem, PromptsView, SetupView, Source
   TicketRow, TicketStage,
   TriggerRow } from '../../src/client/api.ts'
 import { SETUP_FIELDS } from '../../src/deployment.ts'
-import { EvalConfigSchema, ExecutorConfigSchema, PolicyConfigSchema, SettingsSchema } from '../../src/policy.ts'
+import { EvalConfigSchema, ExecutorConfigSchema, PolicyConfigSchema, SchedulesConfigSchema, SettingsSchema } from '../../src/policy.ts'
 import { SetupError, type SetupCode } from '../../src/setup.ts'
 import { feishuChannel } from '../../src/sources/feishu-trigger.ts'
 import { githubChannel } from '../../src/sources/github-trigger.ts'
@@ -88,6 +88,8 @@ export interface PanelServer {
   joined?: Record<string, string>; joining?: Record<string, string>
   joinError?: string
   settings: Settings; revisions: Record<string, number>
+  /** Runs of the scheduled jobs in `settings.schedules`, by job id; `GET schedules` lists them with the jobs. */
+  runs: Record<string, ApiResponse<'GET schedules'>['jobs'][number]['runs']>
   prompts: PromptsView
   tickets: { open: TicketRow[]; ended: TicketRow[] }; ticketDetails: Record<string, TicketPageView>
   threads: ThreadRow[]
@@ -168,7 +170,8 @@ const settingsView = (): ApiResponse<'GET settings'> => ({
   policyVersion: 'abcdef1234567890',
   blocks: { policy: { value: server.settings.policy, revision: server.revisions.policy ?? 0 },
     eval: { value: server.settings.eval, revision: server.revisions.eval ?? 0 },
-    executor: { value: server.settings.executor, revision: server.revisions.executor ?? 0 } },
+    executor: { value: server.settings.executor, revision: server.revisions.executor ?? 0 },
+    schedules: { value: server.settings.schedules, revision: server.revisions.schedules ?? 0 } },
   sources: sourceSettings(),
   environment: { root: '/srv/dsh-superagent/work', variables: [
     { owner: 'executor', enabled: true, variables: [{ key: 'DSH_SUPERAGENT_DIR', description: { zh: '工单的执行目录',
@@ -282,7 +285,7 @@ function initial(): PanelServer {
     setup: { machine: MACHINE, problem: null, feishuProblem: null,
       accounts: { repository: 'acme/widgets', agent: 'agent-bot', feishu: { appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',
         name: 'Widgets Bot' } } },
-    settings, revisions: { policy: 3, eval: 1, executor: 0 },
+    settings, revisions: { policy: 3, eval: 1, executor: 0 }, runs: {},
     prompts: { masterId: 'master', sections: TEAM_SECTIONS, skillName: SKILL_NAME.source, builtin: ['feishu', 'github'],
       skillPrefix: SKILL_PREFIX, revision: 0, current: { ...defaults, config: defaultPrompts() },
       defaults: defaultPrompts(), parts: Object.entries(builtInParts()).map(([key, part]) => ({ key, ...part, base: builtInBase(part.text) })),
@@ -377,13 +380,14 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
   } },
   'PUT settings/:block': { body: true, answer: ({ params: { block }, body }) => {
     const source = block.startsWith('source:') ? KINDS.find(kind => `source:${kind.kind}` === block) : undefined
-    if (!['policy', 'eval', 'executor'].includes(block) && !source) return block.startsWith('source:') ? refuse(404, 'Source not found')
+    if (!['policy', 'eval', 'executor', 'schedules'].includes(block) && !source) return block.startsWith('source:') ? refuse(404, 'Source not found')
       : refuse(400, 'Invalid settings: block')
     if (body.revision !== (server.revisions[block] ?? 0)) return refuse(409, 'Settings changed. Reload before saving.')
     let restarting = false
     if (block === 'policy') server.settings = { ...server.settings, policy: PolicyConfigSchema.parse(body.value) }
     else if (block === 'executor') server.settings = { ...server.settings, executor: ExecutorConfigSchema.parse(body.value) }
     else if (block === 'eval') server.settings = { ...server.settings, eval: EvalConfigSchema.parse(body.value) }
+    else if (block === 'schedules') server.settings = { ...server.settings, schedules: SchedulesConfigSchema.parse(body.value) }
     else if (source) {
       const { enabled, config: value } = SourceSave.parse(body.value)
       const config = source.schema.parse(value)
@@ -399,6 +403,16 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     return { restarting, revision: server.revisions[block] }
   } },
   'GET policy/history': { answer: () => server.history },
+  'GET schedules': { answer: () => ({ paused: server.settings.paused, jobs: server.settings.schedules.jobs.map(job => ({ ...job,
+    running: server.runs[job.id]?.[0]?.outcome === 'running', next: job.enabled ? '2026-09-23T04:05:00Z' : null,
+    runs: server.runs[job.id] ?? [] })) }) },
+  'POST schedules/:id/run': { answer: ({ params }) => {
+    if (!server.settings.schedules.jobs.some(job => job.id === params.id)) return refuse(404, 'Unknown scheduled job', { code: 'unknownJob',
+      values: { job: params.id } })
+    server.runs[params.id] = [{ id: `r${Date.now()}`, reason: 'manual', startedAt: new Date().toISOString(), outcome: 'running' },
+      ...server.runs[params.id] ?? []]
+    return { started: true }
+  } },
   'POST policy-sync/:id': { answer: ({ params }) => ({ policy: server.settings.policy.sources[params.id] }) },
   'POST setup/check': { answer: () => ({ restarting: true }) },
   'GET models': { answer: () => ({ default: { provider: 'host', model: 'default' }, routableProviders: [], failures: [],

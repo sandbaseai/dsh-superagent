@@ -194,6 +194,16 @@ Plugins receive `SourceHost`: the registry and `context(kind)`. The kind itself 
 
 That context supplies deployment and commands, setup readiness (`ready`, `configured`, `problem`), configuration, `receive`, `atomic`, and typed `state`. It also exposes Thread reads and metadata writes, Ticket reads and binding/closure commands, Trigger reads, `notify` through Outbox, and `report` for declared health entries.
 
+### Schedules
+
+`Schedules` (`src/app/schedules.ts`) runs the scheduled jobs of the `schedules` settings block. A job is a shell command with a five-field cron expression, an IANA time zone and a timeout; it runs as `/bin/sh -c <command>` in the service user's home directory through the DSH subprocess runtime, which drops credential-shaped environment variables, and the lifetime or the timeout stops it.
+
+`start`, called with the background loops, marks a run a previous process left `running` as `interrupted`, then goes through the minutes once a minute. A round starts each enabled job whose expression names a minute after `schedule-tick`, at most 15 minutes back, so a minute a restart missed still runs, once. A job has one run at a time; a scheduled minute while its previous run continues, or while processing is paused or setup waits, is recorded as `skipped`. `run(id)`, for the panel, starts a run now, also while paused. `view` lists the jobs with their next minute and their last 20 runs, each with its outcome and the ends of its output. The Runtime waits in `idle` for running commands at shutdown, before the Store closes.
+
+Its `schedules` health entry reports an error while an enabled job's last finished run in this process failed or timed out, naming the last line the command wrote to stderr, so the overview and `dsh-superagent status` show it. The entry starts `ready` at each start: a run that failed before a restart shows only in its record, and a deploy's start check does not fail on it.
+
+Only the panel saves the `schedules` block, since its commands run with the service user's rights; the main Session is not told of its saves and has no tool for it.
+
 ### DshExecutor
 
 `DshExecutor` (`src/executor/dsh.ts`) provides one Session and directory per Ticket. `start` and `deliver` enqueue `launch` and `delivery` effects. `stop` cancels the turn through `Store.afterCommit`, so a rolled-back end does not stop the worker.
@@ -266,7 +276,7 @@ Each model request binds the Session to the current prompt revision. The revisio
   | Prompt versions | Prompts |
   | Effect rows | Effects |
   | Outbox receipts | The Outbox: the Engine's messages and Sources' `notify` go through its `send`, and its `reply` effects mark them |
-  | A health entry | The part that claimed it on the `HealthBoard` (`src/infra/health.ts`), which refuses a second claim: `runtime` the Runtime, which Passes report through, `evals` the Runtime after each pass, `models` Sessions, each effect kind Effects, `worker` the DshExecutor, a Source kind's entries the SourceRegistry for that kind's Source, `sync:<id>` Settings |
+  | A health entry | The part that claimed it on the `HealthBoard` (`src/infra/health.ts`), which refuses a second claim: `runtime` the Runtime, which Passes report through, `evals` the Runtime after each pass, `schedules` Schedules, `models` Sessions, each effect kind Effects, `worker` the DshExecutor, a Source kind's entries the SourceRegistry for that kind's Source, `sync:<id>` Settings |
 
   A Source changes a Ticket only through `SourceContext.tickets.bindThread` and `threadClosed`, which call the Engine.
 - **Requests and facts.** A method that asks for something is named by an imperative verb and its object, such as `stopTicket` or `bindThread`, and may be refused; a method that records what an adapter did is named in the past tense, such as `assignmentStarted` or `deliveryFailed`. Each host receives the Engine as the role type it needs.
@@ -296,6 +306,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/policy.ts` | The Policy: the settings schemas by block, the Policy version, the gate and Mandate revalidation |
 | `src/admission.ts` | The admission table's values, each cell's options and defaults, shared with the panel |
 | `src/limits.ts` | The limits of the values a person sets, which the settings schemas check and the panel's fields offer |
+| `src/cron.ts` | Five-field cron expressions: `parseCron`, `cronMatches` and `nextRun` in an IANA time zone, and `validTimeZone` |
 | `src/kv.ts` | `KV`: every family of `kv` records with its key, its value's type and its owner, and the `Key` and `Family` types the Store and `SourceContext.state` take |
 | `src/navigation.ts` | Opens a DeepSeek Harness Session from the panel once the host's catalog lists it |
 | `src/core/model.ts` | The domain types, among them the typed Ticket and `MandateBasis`, with `threadKey`, `ticketOutcome`, `reached`, `followupOwners`, `settled`, `waitsForPerson`, `liveTicket`, `runningAssignment`, `latestAssignment` and `latestReport` |
@@ -325,6 +336,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/versions.ts` | `Versions`: a record kept as numbered snapshots with a pointer to the current one, for the settings and the prompts |
 | `src/app/cache.ts` | `TextCache`: texts kept in memory within a size, the least recently used dropped first |
 | `src/app/settings.ts` | Settings |
+| `src/app/schedules.ts` | Schedules, the scheduler of scheduled jobs, and `ScheduleRun`, a record of one run |
 | `src/app/settings-history.ts` | `policyHistory`: each saved settings revision with what it changed from the one before |
 | `src/app/prompts.ts` | Prompts, `builtInParts`, the built-in parts a team may override, and `promptParts`, the order of a role's prompt sections |
 | `src/app/context.ts` | The built-in prompt text, read from `prompts/`, and the transcript entries Sessions read |
@@ -386,6 +398,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/overview.tsx` | The overview |
 | `src/client/live.tsx` | The live view: Sources, Router and worker slots as linked cards, the state in one sentence, and the trace of the latest Ticket, polled every 2 seconds |
 | `src/client/source.tsx`, `trigger.tsx`, `eval.tsx`, `execution.tsx` | One file per stage: its status, and its settings where it has some |
+| `src/client/schedule.tsx` | The Schedule status, with each job's next and recent runs and a run by hand, and the scheduled jobs settings |
 | `src/client/thread.tsx`, `ticket.tsx` | The record pages: a Thread with its timeline, and a Ticket with its authorization, Inputs and Assignments |
 | `src/client/settings.tsx` | The Settings tab: the group navigation and the group on screen |
 | `src/client/settings-kit.tsx` | The building blocks of settings blocks: the settings the stage groups share, `useBlockDraft`, the fields, among them a Source kind's, and the history of saves |
@@ -435,7 +448,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/tools.spec.ts` | The Sessions' tools: what `orchestrator_read` reads for each role, and the shapes and checks of the other main Session tools |
 | `tests/runtime-concurrency.spec.ts` | Work that overlaps: Triggers during a pass, Tickets that change during deliveries and launches |
 | `tests/http.spec.ts` | The same-origin and loopback checks, the status of each kind of failure, the body limit, path parameters and queries |
-| `tests/settings.spec.ts` | Settings saves that race a model or account check, a Policy sync that a save outran, and the refusals of the pause, a sync and a block |
+| `tests/settings.spec.ts` | Settings saves that race a model or account check, a Policy sync that a save outran, the refusals of the pause, a sync and a block, and the scheduled jobs a tool cannot save |
+| `tests/schedules.spec.ts` | Cron expressions, and the scheduler: due minutes, the catch-up after a restart, skipped minutes, runs by hand, the kept runs and the health entry |
 | `tests/views.spec.ts` | What the management views derive from the Store, such as the Thread a dropped message belongs to |
 | `tests/timeline.spec.ts` | A Thread's pages and a Trigger's neighbours by time and then id, with every received Trigger's time in one form |
 | `tests/migration.spec.ts` | The schema 11 migration: every stored record in its current shape, and the refusal of older schemas |
@@ -456,6 +470,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/oncall-kit.spec.ts` | The Feishu CLS on-call kit in `examples/feishu-cls-oncall`: its settings against the settings schemas, its prompts against prompt validation, its profile patch as DeepSeek Harness reads it, and `scripts/oncall-apply` against a fake Management API |
 | `tests/client.spec.tsx`, `tests/navigation.spec.ts`, `tests/controls.spec.tsx` | The client plugin's registration and polling, Session navigation and route memory, the local controls, and the panel's imports, which have no cycle |
 | `tests/panel-overview.spec.tsx`, `panel-live.spec.tsx`, `panel-source.spec.tsx`, `panel-trigger.spec.tsx`, `panel-eval.spec.tsx`, `panel-execution.spec.tsx` | Each page of the panel, against a fake management API answered by route |
+| `tests/panel-schedule.spec.tsx` | The Schedule status and the scheduled jobs settings |
 | `tests/panel-settings.spec.tsx`, `panel-prompts.spec.tsx`, `panel-deployment.spec.tsx`, `panel-panel.spec.tsx` | The settings groups, drafts and history, the prompts, the Deployment page, and the panel's search, glossary and route memory |
 | `tests/draft.spec.ts`, `tests/prompt-config.spec.ts`, `tests/markdown.spec.ts`, `tests/marks.spec.ts` | Draft states, merges and the save bar's line; the prompt configuration by section and the line diff; the Markdown subset and its links; the mark of every state the views classify |
 | `tests/locales.spec.ts`, `tests/styles.spec.ts` | The copy in both languages, the stylesheet |
@@ -495,6 +510,7 @@ A generated column is computed from its row's JSON and is empty outside its set,
 | Session prompt history | `session-prompts:<session id>` |
 | Source state | Read positions such as `github-cursor:<number>`, PR CI fingerprints and seen Feishu-topic messages; keys begin with the kind or `thread-` plus a Thread key |
 | Display names | `source-labels:<source id>` |
+| Scheduled jobs | `schedule-tick`, the last minute the scheduler went through, and `schedule-runs:<job id>`, a job's last 20 runs |
 
 Dismissal is stored on its Decision. Input text is rendered from the Ticket when read, so neither needs a separate key-value record.
 
@@ -619,7 +635,7 @@ Workers receive assignments and Inputs inline. The first message includes the ti
 
 ### Panel-only actions
 
-There is no tool for dismissing an unavailable Decision, rerunning setup, refreshing Source display names, or sending an Executor-owned human follow-up to Eval. The last action is deliberately refused by `orchestrator_trigger_requeue`. Other panel actions have equivalent tools.
+There is no tool for dismissing an unavailable Decision, rerunning setup, refreshing Source display names, editing or running scheduled jobs, or sending an Executor-owned human follow-up to Eval. The last action is deliberately refused by `orchestrator_trigger_requeue`. Other panel actions have equivalent tools.
 
 Most built-in instructions live in `prompts/*.md`, with one sentence per line joined by `promptFile`. Source skills live in `skills/dsh-superagent-*/SKILL.md`. Tool descriptions and fixed notices such as restart recovery notes remain in code. Assessment instructions live only in `prompts/admission.md`.
 

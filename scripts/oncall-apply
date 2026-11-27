@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Save the Feishu on-call kit (examples/feishu-cls-oncall) to a running dsh-superagent through its Management API.
 Fills the kit's placeholders from the arguments, refuses when one is left or an id is malformed, then saves the settings
-blocks `source:feishu`, `policy`, `eval` and `executor` in that order, waiting for the service to answer again after a save
-that restarts it, and finally the prompt configuration: team sections, the `oncall-alerts` skill and three overrides of
-built-in parts, each with the base it was written against. `--dry-run` prints the request bodies and sends nothing. Exit 0 when everything was saved, 1 when the
-service refused or did not answer, and 2 for invalid arguments or an incomplete kit.
+blocks `source:feishu`, `policy`, `eval`, `executor` and, when the kit has `settings/schedules.json`, `schedules` in
+that order, waiting for the service to answer again after a save that restarts it, and finally the prompt configuration:
+team sections, the `oncall-alerts` skill and three overrides of built-in parts, each with the base it was written
+against. `--dry-run` prints the request bodies and sends nothing. Exit 0 when everything was saved, 1 when the service
+refused or did not answer, and 2 for invalid arguments or an incomplete kit.
 """
 import argparse
 import copy
@@ -21,6 +22,8 @@ BOT_ID = re.compile(r'^(cli|ou)_[a-zA-Z0-9]+$')
 PLACEHOLDER = re.compile(r'<[^<>\s][^<>]*>')
 # Settings blocks in the order they are saved, with the kit file of each.
 BLOCKS = [('source:feishu', 'source-feishu.json'), ('policy', 'policy.json'), ('eval', 'eval.json'), ('executor', 'executor.json')]
+# Saved after the others when the kit has it: the scheduled jobs, such as its digests.
+OPTIONAL_BLOCKS = [('schedules', 'schedules.json')]
 OVERRIDES = {'runtime/worker': 'runtime-worker.md', 'runtime/work': 'runtime-work.md', 'runtime/admission': 'runtime-admission.md'}
 SKILLS = {'oncall-alerts': 'oncall-alerts.md'}
 # The built-in base key of each overridden part, as Prompts.validate computes it from the text the kit was written against.
@@ -66,6 +69,8 @@ def placeholders(value):
 def settings_values(kit, args):
     """Return the settings blocks of the kit, in save order, with the arguments filled in."""
     values = {block: read_json(kit / 'settings' / name) for block, name in BLOCKS}
+    optional = [(block, name) for block, name in OPTIONAL_BLOCKS if (kit / 'settings' / name).exists()]
+    values.update({block: read_json(kit / 'settings' / name) for block, name in optional})
     chats = ids(args.alert_chat, CHAT_ID, '--alert-chat')
     bots = ids(args.alert_bot, BOT_ID, '--alert-bot')
     if not args.lark_cli.strip():
@@ -92,7 +97,7 @@ def settings_values(kit, args):
         left = placeholders(value)
         if left:
             raise Invalid('the ' + block + ' block still has placeholders: ' + ', '.join(sorted(set(left))))
-    return [(block, values[block]) for block, _ in BLOCKS]
+    return [(block, values[block]) for block, _ in BLOCKS + optional]
 def prompt_config(kit):
     """Return the kit's prompt configuration: team sections, team skills and overrides of built-in parts."""
     sections = {name: read_text(kit / 'prompts' / (name + '.md')) for name in ('communication', 'scope', 'delivery')}
@@ -148,7 +153,7 @@ def refusal(raw):
 def revisions(api):
     """Return the current revision of every settings block the kit saves, from `GET settings`."""
     view = api.call('GET', 'settings')
-    found = {name: view['blocks'][name]['revision'] for name in ('policy', 'eval', 'executor')}
+    found = {name: block['revision'] for name, block in view['blocks'].items()}
     for source in view.get('sources') or []:
         if source.get('id') == 'feishu':
             if not source.get('installed', True):
@@ -170,10 +175,10 @@ def apply(api, blocks, config):
     """Save the settings blocks in order, then the prompt configuration."""
     current = revisions(api)
     for block, value in blocks:
-        answer = api.call('PUT', 'settings/' + block, {'value': value, 'revision': current[block]})
+        answer = api.call('PUT', 'settings/' + block, {'value': value, 'revision': current.get(block, 0)})
         restarting = bool(answer.get('restarting'))
         print('saved ' + block + ' revision ' + str(answer.get('revision')) + (' (restarting)' if restarting else ''))
-        current[block] = answer.get('revision', current[block])
+        current[block] = answer.get('revision', current.get(block, 0))
         if restarting:
             wait_for_restart(api)
             current = revisions(api)

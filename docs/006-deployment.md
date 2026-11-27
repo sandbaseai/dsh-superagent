@@ -156,6 +156,7 @@ Setup must succeed before polling or work starts. Overview lists missing require
 
    List personal CLIs, such as one signed in to your own account, as blocked commands.
 4. **Prompts.** Set the team sections: the GitHub disclosure line, review bots, the commit author and the auto-merge condition.
+5. **Scheduled jobs.** Optional: shell commands the service runs on cron schedules, such as digests posted to a chat. Each job has a five-field cron expression in an IANA time zone (`5 12-21/3 * * *` in `Asia/Shanghai` is 12:05, 15:05, 18:05 and 21:05 Beijing time), a command run with `/bin/sh -c` in the service user's home directory without credential-shaped environment variables, and a timeout. The **Schedule** tab shows each job's next run and its last 20 runs with the ends of their output, and runs a job by hand. A minute missed while the service restarted runs once if it is at most 15 minutes old; while processing is paused, scheduled minutes are skipped. A failed run is reported under the `schedules` health entry until the job next succeeds, or the service restarts. A check that must work while the service is down, such as the hourly check above, stays outside it.
 
 ### Management API
 
@@ -170,7 +171,7 @@ Agents may rely on these routes and fields. The other routes in `src/app/api.ts`
 | Request | Answer |
 | --- | --- |
 | `GET state` | What every page reads: `setup`, with `problem` and `feishuProblem`, each `null` or a setup problem with `place`, `code`, `values` and `detail`, and `accounts` once setup resolved them; `health`, an entry per part, below, with `state` (`starting`, `ready`, `paused` or `error`), `detail` and `at`; `load`, the Executor Sessions `running`, the Tickets `queued` and `maxWorkers`; `paused`; and `masterId` |
-| `GET settings` | `blocks`: `policy`, `eval` and `executor`, each with its `value` and its `revision`; `sources`: the Source instances, each with `id`, `kind`, `installed`, its block's `value`, `{"enabled": …, "config": {…}}`, and `revision`, its kind's form, and its setup `problem` when it has one; `policyVersion`; and `environment`, the execution environment's `root` and `variables` |
+| `GET settings` | `blocks`: `policy`, `eval`, `executor` and `schedules`, each with its `value` and its `revision`; `sources`: the Source instances, each with `id`, `kind`, `installed`, its block's `value`, `{"enabled": …, "config": {…}}`, and `revision`, its kind's form, and its setup `problem` when it has one; `policyVersion`; and `environment`, the execution environment's `root` and `variables` |
 | `GET sources` | Each Source's status: `state` (`missing`, `off`, `error`, `setup`, `starting`, `paused` or `ready`), the `health` of its parts, its setup `problem`, the last day's `stats`, the Triggers it `filtered` in that day, and the messages it `dropped` in that day, newest drop first, each with its `channel`, `preview`, `ticket` (`id` and `title`) when it was for one, its `thread` when the store has it, and `dropped.at` and `dropped.reason`, `channelGone`, `channelIgnored` or `tooLong` |
 | `PUT settings/<block>` with `{"value": …, "revision": n}` | Saves one block: `saved`, the block's new `revision`, `policy_changed` and `restarting`. `value` is the whole block, as `GET settings` holds it; a missing key takes its default |
 | `POST executor/pause` with `{"paused": true}` or `false` | Pauses or resumes processing: `paused` |
@@ -178,6 +179,7 @@ Agents may rely on these routes and fields. The other routes in `src/app/api.ts`
 | `POST policy-sync/<source id>` | Syncs that Source's allowed list now: `policy`, the Source's part as saved |
 | `GET prompts`, `PUT prompts` with `{"config", "baseRevision"}` | Reads the prompt configuration: `current`, with its `revision` and `config`, `defaults`, `sections`, the team sections in the order Sessions read them, `skillName`, the pattern of a team skill's name, `builtin`, the names a team skill cannot take, and `skillPrefix`, which Sessions load a skill's name under. Or saves it: the new `revision` |
 | `POST tickets/<id>/retry`, `POST tickets/<id>/stop` | Retries or stops a Ticket, as the panel does |
+| `GET schedules`, `POST schedules/<job id>/run` | Lists the scheduled jobs: `paused`, and `jobs`, each with its settings, `running`, `next`, its next minute or `null`, and `runs`, its last 20, newest first, each with `reason` (`schedule` or `manual`), `slot`, `startedAt`, `endedAt`, `outcome` (`running`, `succeeded`, `failed`, `timedOut`, `interrupted` or `skipped`, with `skipped` `paused` or `running`), `exitCode`, and the ends of `stdout` and `stderr`. Or starts a run of a job now: `started: true`; refused while it runs |
 
 Health entries are grouped by responsibility:
 
@@ -190,6 +192,7 @@ Health entries are grouped by responsibility:
 | `worker` | Executor Session event handling; appears after its first failure |
 | `github`, `feishu`, `history` | Source polling, events and history recovery |
 | `sync:<source id>` | Allowed-list synchronization |
+| `schedules` | Scheduled jobs whose last run since the service started failed or timed out |
 
 A refusal has a status and `error`, its English text:
 
@@ -204,6 +207,7 @@ The blocks:
 - `policy`: `{"rules": […], "sources": {"github": {"allowed": [{"id": "<login>"}], "bots": [{"id": "dependabot[bot]"}]}, "feishu": {"allowed": [{"id": "ou_…", "name": "…"}], "syncChat": "oc_…", "admission": {"oc_…": {"unlistedAddressed": "explicit"}}}}}`. `bots` lists the bots whose messages may become inferred candidates. An `admission` row is keyed by chat id, `other` or `direct` for Feishu, and by `issues`, `pulls`, `comments` or `ci` for GitHub; an unset cell takes its default (see [002 Authorization](002-authorization.md)).
 - `eval`: `mode`, `timeoutSeconds`, `model`, and `nearbyMinutes` (default 30): how far back a candidate's `nearby_tickets` reach.
 - `executor`: `model`, `maxWorkers`, `directory`, `prepare` and `blockedCommands`. The processing pause is a setting of its own, `paused`, which `POST executor/pause` sets.
+- `schedules`: `{"jobs": [{"id": "brief", "name": "…", "enabled": true, "cron": "5 12-21/3 * * *", "timeZone": "Asia/Shanghai", "command": "…", "timeoutMinutes": 30}]}`, at most 20 jobs with distinct ids of lowercase letters, digits and `-`; a job's runs are kept under its id. Only the panel and this API save it, not the main Session's tools.
 
 Changing a repository or CLI runs the corresponding setup check first. A failed check returns 400 with details in `setup`. A successful account change, or any save while setup is pending, returns `restarting: true`. The API is temporarily unavailable while the application restarts.
 

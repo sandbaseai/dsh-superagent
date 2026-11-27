@@ -2,7 +2,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { z } from 'zod'
 import { UserError, type EngineForSettings } from '../core/index.ts'
-import { EvalConfigSchema, ExecutorConfigSchema, PolicyConfigSchema, SettingsSchema, policyEffects, policyVersion } from '../policy.ts'
+import { EvalConfigSchema, ExecutorConfigSchema, PolicyConfigSchema, SchedulesConfigSchema, SettingsSchema, policyEffects, policyVersion }
+  from '../policy.ts'
 import type { Settings as SettingsValue, SettingsBlock, SettingsOrigin, SettingsSave } from '../policy.ts'
 import type { SourceHost } from '../sources/host.ts'
 import type { HealthBoard, HealthEntry } from '../infra/health.ts'
@@ -28,8 +29,10 @@ interface Block {
   parse(value: unknown, sources: SourceRegistry, id: string): unknown
   merge(settings: SettingsValue, value: unknown, id: string): SettingsValue
   guard?(current: SettingsValue, candidate: SettingsValue, origin: SettingsOrigin): void
+  /** Saves of this block do not concern the main Session, which is not told of them. */
+  quiet?: true
 }
-const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'source', Block> = {
+const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'schedules' | 'source', Block> = {
   policy: {
     parse: (value, sources) => {
       const policy = PolicyConfigSchema.parse(value)
@@ -43,6 +46,14 @@ const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'source', Block> = {
     merge: (settings, value) => ({ ...settings, executor: value as SettingsValue['executor'] }),
     // Only the management panel may modify shell execution paths or commands.
     guard: (current, candidate, origin) => { if (origin !== 'panel' && environment(current) !== environment(candidate)) throw new UserError('panelOnlyEnvironment') },
+  },
+  schedules: {
+    parse: value => SchedulesConfigSchema.parse(value),
+    merge: (settings, value) => ({ ...settings, schedules: value as SettingsValue['schedules'] }),
+    guard: (current, candidate, origin) => {
+      if (origin !== 'panel' && JSON.stringify(current.schedules) !== JSON.stringify(candidate.schedules)) throw new UserError('panelOnlySchedules')
+    },
+    quiet: true,
   },
   source: {
     parse: (value, sources, id) => sources.validate(id, z.object({ enabled: z.boolean(), config: z.unknown() }).parse(value)),
@@ -181,7 +192,7 @@ export class Settings {
     const notified = [...effects.keys()]
     store.atomic(() => {
       store.saveSettings(SettingsSchema.parse(settings), { source: origin, block, policyVersion: after, policyChanged: before !== after, notified })
-      if (origin !== 'tool') sessions.notify(...settingsNotice(block, changedPaths(old, settings)))
+      if (origin !== 'tool' && !rules.quiet) sessions.notify(...settingsNotice(block, changedPaths(old, settings)))
       if (before !== after) engine.policyChanged(before, after, effects)
     })
     // Rewrite worker command shims immediately when `blockedCommands` changes.
