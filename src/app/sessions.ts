@@ -13,6 +13,7 @@ import { AgentDelivery, messageId } from './delivery.ts'
 import type { Effects } from './effects.ts'
 import type { Variable } from './execution-environment.ts'
 import { RetryHealth } from './retry-health.ts'
+import { CompactionHealth } from './compaction-health.ts'
 import { initializeRoleModel } from './role-models.ts'
 import { bundledSkills } from './skill-files.ts'
 import { SKILL_PREFIX, type PromptVersion, type Prompts } from './prompts.ts'
@@ -95,6 +96,7 @@ export class Sessions {
   /** Decorated agents mapped to their registered disposers and skill scope until the agent is disposed or `Sessions.dispose()` runs. */
   private readonly bindings = new Map<Agent, SessionBinding>()
   private readonly retryHealth = new RetryHealth()
+  private readonly compactionHealth = new CompactionHealth()
   private readonly ctx: Context
   /** Registers ordered `relay` and `notice` effect handlers that deliver to the main Session. */
   constructor(private readonly host: SessionsHost) {
@@ -109,13 +111,14 @@ export class Sessions {
     const ctx = this.ctx
     ctx.on('agent/disposed', ({ agent }) => {
       this.release(agent)
-      this.retryHealth.clear(agent.id); this.updateModelHealth()
+      this.retryHealth.clear(agent.id); this.compactionHealth.forget(agent.id); this.updateModelHealth()
     })
     ctx.on('session/event', (session, event) => {
       const agent = ctx.agents.get(session.id)
       const binding = agent && agent.session === session ? this.bindings.get(agent) : undefined
       if (!agent || !binding || binding.subagent) return
       this.retryHealth.observe(agent.id, event)
+      this.compactionHealth.observe(agent.id, event)
       this.updateModelHealth()
     })
     ctx.on('agent/created', async ({ agent }) => { await this.decorate(agent); return undefined })
@@ -220,10 +223,15 @@ export class Sessions {
     return retry ? { model_retry: retry } : {}
   }
   private updateModelHealth(): void {
-    const retries = this.retryHealth.list()
-    this.host.health.set(retries.length
-      ? { state: 'error', detail: retries.slice(0, 5).map(item => `${item.sessionId}: ${item.provider} is over its model budget; retried ${item.attempts} times, waiting since ${item.since}; the model and retry policy are unchanged`).join('; ') + (retries.length > 5 ? `; ${retries.length - 5} more Sessions` : ''), at: retries.at(-1)!.lastAt }
-      : { state: 'ready', detail: 'No managed Session is waiting on a model budget retry' })
+    const retries = this.retryHealth.list().map(item => ({ at: item.lastAt,
+      text: `${item.sessionId}: ${item.provider} is over its model budget; retried ${item.attempts} times, waiting since ${item.since}; the model and retry policy are unchanged` }))
+    const compactions = this.compactionHealth.list().map(item => ({ at: item.lastAt,
+      text: `${item.sessionId}: its last ${item.failures} context compactions failed (${item.cause}) since ${item.since}` }))
+    const problems = [...compactions, ...retries]
+    this.host.health.set(problems.length
+      ? { state: 'error', detail: problems.slice(0, 5).map(item => item.text).join('; ') + (problems.length > 5 ? `; ${problems.length - 5} more Sessions` : ''),
+        at: problems.map(item => item.at).sort().at(-1)! }
+      : { state: 'ready', detail: 'No managed Session is waiting on a model budget retry or failing to compact its context' })
   }
   private ticketOf(agent: Agent): Ticket | undefined {
     const ticketId = ticketOfSession(agent.id)
@@ -237,7 +245,9 @@ export class Sessions {
     if (!master && !ticket) { this.limitSubagent(agent); return }
     const binding: SessionBinding = { disposers: [] }
     this.bindings.set(agent, binding)
-    this.retryHealth.restore(agent.id, agent.session.snapshotEvents())
+    const events = agent.session.snapshotEvents()
+    this.retryHealth.restore(agent.id, events)
+    this.compactionHealth.restore(agent.id, events)
     if (agent.status === 'idle') this.retryHealth.clear(agent.id)
     this.updateModelHealth()
     // Disable variable interpolation so literal ${{ ... }} expressions in team prompts are preserved.
