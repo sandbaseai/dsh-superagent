@@ -5,12 +5,14 @@ A worker runs `oncall-fix submit` when a person on the thread asks for it: `--ki
 problem a small code or configuration change fixes, done by the fix Agent; `--kind design` for a design proposal written
 as a pull request, done by the dev Agent. Cron runs `oncall-fix tick` every few minutes. Each one moves through:
 
+  pending_confirmation  a saved proposal, grouped only by repository and explicit problem-key; no Agent has started
+  dismissed a person explicitly declined the pending proposal
   fixing    the Agent works in its own SandBase Session and opens a pull request (or explains why it did not)
   review    the review Agent reads the pull request and posts its findings as a pull request comment
   revising  the review asked for changes: the same Session gets them and pushes to the same branch, then review again
   ready     the review passed: a person reads the pull request and asks on the thread to merge it
   merging   `oncall-fix merge`: the same Session merges the reviewed head, or says why not (then ready again)
-  merged    the pull request was merged; in a repository listed in RELEASES its release starts at once
+  merged    the pull request was merged; repositories listed in RELEASES start release at once
   releasing a new Session of the fix Agent, with the repository cloned, tags the head of main with the next vMAJOR.MINOR.PATCH,
             dispatches the release workflow with that tag and waits for the run; `oncall-fix release` starts it for a pull
             request a person merged, or again after a release that did not start
@@ -38,10 +40,21 @@ Which repositories can be changed is the Agents' GitHub authorization; this tool
 at most three requests in all, one at a time; a design is asked for again only while none has opened a pull request.
 
   oncall-fix submit [--kind fix|design] --repository owner/name --brief FILE [--by OPEN_ID] [--ticket ID]   (ticket: $DSH_SUPERAGENT_TICKET)
-  oncall-fix merge [--pr NUMBER] [--by OPEN_ID] [--ticket ID]   (when a person on the thread asked to merge a ready pull request)
-  oncall-fix release [--pr NUMBER] [--by OPEN_ID] [--ticket ID]   (when a person on the thread merged a pull request and asks to release it)
+  oncall-fix merge [--repository owner/name] [--pr NUMBER] [--by OPEN_ID] [--ticket ID]   (when a person on the thread asked to merge a ready pull request)
+  oncall-fix release [--repository owner/name] [--pr NUMBER] [--by OPEN_ID] [--ticket ID]
+                    (when a person on the thread merged a pull request and asks to release it)
   oncall-fix tick [--url http://127.0.0.1:3082] [--lark-cli lark-bot] [--dry-run]
-  oncall-fix status
+  oncall-fix propose --repository owner/name --problem-key KEY --brief FILE [--kind fix|design] [--ticket ID]
+  oncall-fix submit --by OPEN_ID [--ticket ID] [--repository owner/name] [--problem-key KEY]   (confirm a saved proposal)
+  oncall-fix dismiss --by OPEN_ID --reason TEXT [--ticket ID] [--repository owner/name] [--problem-key KEY]
+  oncall-fix verify --result passed|failed --evidence FILE [--by OPEN_ID] [--ticket ID] [--repository owner/name] [--problem-key KEY]
+  oncall-fix status [--json]
+
+Proposals retain the first brief as proposed_brief and the original reply topic; associated tickets can confirm the same request.
+With explicit consent, submit --brief replaces the execution brief while preserving the proposed brief for audit.
+Pending proposals get at most two gentle reminders: after 72 hours, then at least seven days apart.
+Verification retains evidence and history without changing merged/released; a failed check sets needs_attention.
+Propose, status, dismiss and verify need no Agents credentials. Tick --dry-run makes no requests or state writes.
 
 --by is the open_id of the person who asked; replies that need a person mention them, and no one else.
 
@@ -70,7 +83,8 @@ REPOSITORY = re.compile(r'^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$')
 TICKET = re.compile(r'^[0-9a-f]{8,64}$')
 MAX_BRIEF = 12000
 STAGE_HOURS = 3
-DONE = {'ready', 'merged', 'released', 'needs_human', 'no_pr', 'failed', 'release_failed'}
+DONE = {'ready', 'merged', 'released', 'needs_human', 'no_pr', 'failed', 'release_failed', 'dismissed'}
+PROBLEM_KEY = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,199}$')
 SHA = re.compile(r'^[0-9a-f]{40}$')
 MAX_PER_TICKET = 3
 MAX_RELEASES = 3
@@ -353,13 +367,26 @@ def notify(args, fix, text):
     message = next(((channel.get('address') or {}).get('messageId') for channel in channels
                     if channel.get('source') == 'feishu' and (channel.get('address') or {}).get('messageId')), None)
     if not message:
-        return
+        return False
     key = hashlib.sha256(f'{fix.get("tag", fix["ticket"])}:{text}'.encode()).hexdigest()[:40]
     with tempfile.TemporaryDirectory(prefix='oncall-fix-') as scratch:
         result = subprocess.run([args.lark_cli, 'im', '+messages-reply', '--message-id', message, '--markdown', text, '--reply-in-thread',
                                  '--idempotency-key', key, '--as', 'bot'], cwd=scratch, capture_output=True, text=True, timeout=120, check=False)
     if result.returncode != 0:
         raise Failed(f'lark-cli reply exited {result.returncode}: {(result.stderr or result.stdout).strip()[-300:]}')
+    return True
+
+
+def remind(args, fix):
+    count = fix.get('reminder_count', 0)
+    if count >= 2 or now() < datetime.datetime.fromisoformat(fix['created']) + datetime.timedelta(hours=72):
+        return
+    if fix.get('reminded_at') and now() < datetime.datetime.fromisoformat(fix['reminded_at']) + datetime.timedelta(days=7):
+        return
+    text = (f'**修复提议待确认**（第 {count + 1} 次提醒）：`{fix["repository"]}` / `{fix["problem_key"]}`。'
+            '这项提议还在等待确认；方便时可在本话题回复同意处理，或暂不处理。尚未启动开发。')
+    if notify(args, fix, text):
+        fix.update(reminder_count=count + 1, reminded_at=stamp())
 
 
 def mention(fix):
@@ -488,6 +515,8 @@ def start_release(args, agents, fix, release):
     sha = fix.get('merge_sha') or fix['head_sha']
     fix['release_session'] = agents.start(args.fix_agent, f'oncall-release: {fix["repository"]}#{fix["pr_number"]}',
                                           release_task(fix, release, sha, key), key, workspace=release['repository_id'])
+    fix.pop('verification', None)
+    fix.pop('needs_attention', None)
     fix.update(stage='releasing', since=stamp(), release_attempts=attempt, release_answer=None,
                release_started=now().strftime('%Y-%m-%dT%H:%M:%SZ'))
 
@@ -547,11 +576,136 @@ def refusal(mine, kind):
 
 
 def asker(args):
-    if args.by and not OPEN_ID.match(args.by):
+    if args.by and not OPEN_ID.fullmatch(args.by):
         raise Refused('--by must be the open_id (ou_...) of the person who asked')
 
 
+def ticket_arg(args):
+    ticket = args.ticket or os.environ.get('DSH_SUPERAGENT_TICKET', '')
+    if not TICKET.fullmatch(ticket):
+        raise Refused('--ticket (or DSH_SUPERAGENT_TICKET) must be a ticket id')
+    if args.repository is not None and not REPOSITORY.fullmatch(args.repository):
+        raise Refused('--repository must be owner/name')
+    if args.problem_key is not None and not PROBLEM_KEY.fullmatch(args.problem_key):
+        raise Refused('--problem-key must be 1-200 characters: letters, digits, _, ., :, /, -')
+    return ticket
+
+
+def linked(fix, ticket):
+    return ticket == fix['ticket'] or ticket in fix.get('tickets', [])
+
+
+def read_brief(path):
+    text = (sys.stdin.read() if path == '-' else Path(path).read_text(encoding='utf-8')).strip()
+    if not 40 <= len(text) <= MAX_BRIEF:
+        raise Refused(f'the brief must be 40-{MAX_BRIEF} characters: the problem, the evidence and the change wanted')
+    return text
+
+
+def candidates(args, fixes, ticket):
+    return [fix for fix in fixes.values() if linked(fix, ticket)
+            and (args.repository is None or fix['repository'].lower() == args.repository.lower())
+            and (args.problem_key is None or fix.get('problem_key') == args.problem_key)]
+
+
+def command_propose(args):
+    ticket = ticket_arg(args)
+    brief = read_brief(args.brief)
+    repository = args.repository.lower()
+    key = 'proposal:' + hashlib.sha256(json.dumps([repository, args.problem_key]).encode()).hexdigest()
+    with state(args.state) as fixes:
+        record = fixes.get(key)
+        if record:
+            if record.get('kind', 'fix') != args.kind:
+                raise Refused('this problem already has a different kind of proposal')
+            if ticket not in record['tickets']:
+                record['tickets'].append(ticket)
+        else:
+            record = {'ticket': ticket, 'tickets': [ticket], 'repository': repository, 'problem_key': args.problem_key,
+                      'kind': args.kind, 'brief': brief, 'proposed_brief': brief, 'tag': key.replace(':', '-'), 'stage': 'pending_confirmation',
+                      'created': stamp(), 'since': stamp(), 'reminder_count': 0}
+            fixes[key] = record
+    print(json.dumps(record, ensure_ascii=False))
+    return 0
+
+
+def command_close(args):
+    ticket = ticket_arg(args)
+    asker(args)
+    if args.command == 'dismiss':
+        if not args.by:
+            raise Refused('--by is required to dismiss a proposal')
+        if not args.reason.strip():
+            raise Refused('--reason must not be empty')
+    else:
+        evidence = Path(args.evidence).read_text(encoding='utf-8').strip()
+        if not 1 <= len(evidence) <= MAX_BRIEF:
+            raise Refused(f'--evidence must contain 1-{MAX_BRIEF} characters')
+    with state(args.state) as fixes:
+        matches = candidates(args, fixes, ticket)
+        if len(matches) != 1:
+            raise Refused('expected one request; use --repository and --problem-key to disambiguate')
+        record = matches[0]
+        if args.command == 'dismiss':
+            if record['stage'] != 'pending_confirmation':
+                raise Refused('only a pending confirmation can be dismissed')
+            record.update(stage='dismissed', since=stamp(), dismissed_by=args.by, reason=args.reason.strip())
+        else:
+            if record['stage'] not in ('merged', 'released'):
+                raise Refused('only merged/released requests can be verified')
+            verification = {'result': args.result, 'evidence': evidence, 'at': stamp(), 'by': args.by,
+                            'stage': record['stage'], 'ticket': ticket,
+                            'merge_sha': record.get('merge_sha'), 'release_tag': record.get('release_tag')}
+            record.setdefault('verifications', []).append(verification)
+            record.update(verification=verification, needs_attention=args.result == 'failed')
+    print(json.dumps(record, ensure_ascii=False))
+    return 0
+
+
 def command_submit(args, config):
+    ticket = ticket_arg(args)
+    asker(args)
+    with state(args.state) as fixes:
+        proposals = [fix for fix in candidates(args, fixes, ticket) if fix.get('problem_key')
+                     and (args.problem_key or fix['stage'] == 'pending_confirmation')
+                     and (args.problem_key or not (args.kind and args.brief) or fix['kind'] == args.kind)]
+        if len(proposals) > 1:
+            raise Refused('several proposals: pass --repository and --problem-key')
+        if proposals:
+            record = proposals[0]
+            if record['stage'] != 'pending_confirmation':
+                raise Refused('this proposal was already submitted or dismissed')
+            if not args.by:
+                raise Refused('--by is required to confirm a proposal')
+            if args.kind and args.kind != record['kind']:
+                raise Refused('--kind differs from the saved proposal')
+            brief = read_brief(args.brief) if args.brief else record['brief']
+            workspace = config['clones'].get(record['repository'].lower())
+            agent = config.get(KINDS[record['kind']]['agent'])
+            if not workspace or not agent:
+                raise Refused('proposal repository or Agent is not configured')
+            others = [fix for fix in fixes.values() if fix is not record and
+                      any(linked(fix, t) for t in record['tickets']) and fix['stage'] not in ('pending_confirmation', 'dismissed')]
+            refused = refusal(others, record['kind'])
+            if refused:
+                raise Refused(refused[0])
+            record.setdefault('proposed_brief', record['brief'])
+            record['brief'] = brief
+            task = (design_task if record['kind'] == 'design' else fix_task)(record['repository'], record['ticket'], brief)
+            session = Agents(config).start(agent, f'oncall-{record["kind"]}: {record["repository"]}', task,
+                                           f'oncall-{record["kind"]}-{tag(record)}', workspace=workspace)
+            record.update(stage='fixing', since=stamp(), fix_session=session, by=args.by, confirmed_ticket=ticket, confirmed_at=stamp())
+            print(json.dumps({'submitted': True, 'kind': record['kind'], 'stage': 'fixing', 'session': session}))
+            return 0
+        if args.problem_key:
+            raise Refused('no matching proposal for this ticket')
+        if not args.repository or not args.brief:
+            raise Refused('new submissions require --repository and --brief')
+        args.kind = args.kind or 'fix'
+        return legacy_submit(args, config, fixes)
+
+
+def legacy_submit(args, config, fixes):
     ticket = args.ticket or os.environ.get('DSH_SUPERAGENT_TICKET', '')
     if not TICKET.match(ticket):
         raise Refused('--ticket (or DSH_SUPERAGENT_TICKET) must be a ticket id')
@@ -567,18 +721,17 @@ def command_submit(args, config):
     if not agent:
         raise Refused(f'{args.config} lacks {KINDS[args.kind]["agent"]} for --kind {args.kind}')
     asker(args)
-    with state(args.state) as fixes:
-        mine = [fix for fix in fixes.values() if fix['ticket'] == ticket]
-        refused = refusal(mine, args.kind)
-        if refused:
-            print(json.dumps({'refused': refused[0], **refused[1]}, ensure_ascii=False))
-            return 2
-        key, fix_tag = (ticket, ticket[:16]) if not mine else (f'{ticket}:{len(mine) + 1}', f'{ticket[:16]}-{len(mine) + 1}')
-        task = (design_task if args.kind == 'design' else fix_task)(args.repository, ticket, brief)
-        session = Agents(config).start(agent, f'oncall-{args.kind}: {args.repository} for ticket {ticket[:8]}', task, f'oncall-{args.kind}-{fix_tag}',
-                                       workspace=workspace)
-        fixes[key] = {'ticket': ticket, 'kind': args.kind, 'tag': fix_tag, 'repository': args.repository, 'brief': brief,
-                      'fix_session': session, 'stage': 'fixing', 'created': stamp(), 'since': stamp(), **({'by': args.by} if args.by else {})}
+    mine = [fix for fix in fixes.values() if linked(fix, ticket) and fix['stage'] not in ('pending_confirmation', 'dismissed')]
+    refused = refusal(mine, args.kind)
+    if refused:
+        print(json.dumps({'refused': refused[0], **refused[1]}, ensure_ascii=False))
+        return 2
+    key, fix_tag = (ticket, ticket[:16]) if not mine else (f'{ticket}:{len(mine) + 1}', f'{ticket[:16]}-{len(mine) + 1}')
+    task = (design_task if args.kind == 'design' else fix_task)(args.repository, ticket, brief)
+    session = Agents(config).start(agent, f'oncall-{args.kind}: {args.repository} for ticket {ticket[:8]}', task, f'oncall-{args.kind}-{fix_tag}',
+                                   workspace=workspace)
+    fixes[key] = {'ticket': ticket, 'kind': args.kind, 'tag': fix_tag, 'repository': args.repository, 'brief': brief,
+                  'fix_session': session, 'stage': 'fixing', 'created': stamp(), 'since': stamp(), **({'by': args.by} if args.by else {})}
     print(json.dumps({'submitted': True, 'kind': args.kind, 'stage': 'fixing', 'session': session,
                       'note': 'the pull request and its review are replied into this alert topic; do not wait for them'}, ensure_ascii=False))
     return 0
@@ -589,12 +742,16 @@ def command_merge(args, config):
     if not TICKET.match(ticket):
         raise Refused('--ticket (or DSH_SUPERAGENT_TICKET) must be a ticket id')
     asker(args)
+    if args.repository is not None and not REPOSITORY.fullmatch(args.repository):
+        raise Refused('--repository must be owner/name')
     with state(args.state) as fixes:
-        ready = [fix for fix in fixes.values() if fix['ticket'] == ticket and fix['stage'] == 'ready' and fix.get('pr_number')
-                 and (args.pr is None or fix['pr_number'] == args.pr)]
+        ready = [fix for fix in fixes.values() if linked(fix, ticket) and fix['stage'] == 'ready' and fix.get('pr_number')
+                 and (args.pr is None or fix['pr_number'] == args.pr)
+                 and (args.repository is None or fix['repository'].lower() == args.repository.lower())]
         if len(ready) != 1:
-            mine = [{'kind': fix.get('kind', 'fix'), 'stage': fix['stage'], 'pr_url': fix.get('pr_url')} for fix in fixes.values() if fix['ticket'] == ticket]
-            why = 'no pull request of this ticket passed review and waits to be merged' if not ready else 'several are ready: pass --pr'
+            mine = [{'kind': fix.get('kind', 'fix'), 'stage': fix['stage'], 'pr_url': fix.get('pr_url')} for fix in fixes.values() if linked(fix, ticket)]
+            why = ('no pull request of this ticket passed review and waits to be merged' if not ready else
+                   'several are ready: pass --repository owner/name and --pr NUMBER (PR numbers are repository-local)')
             print(json.dumps({'refused': why, 'requests': mine}, ensure_ascii=False))
             return 2
         fix = ready[0]
@@ -623,11 +780,16 @@ def command_release(args, config):
     if not TICKET.match(ticket):
         raise Refused('--ticket (or DSH_SUPERAGENT_TICKET) must be a ticket id')
     asker(args)
+    if args.repository is not None and not REPOSITORY.fullmatch(args.repository):
+        raise Refused('--repository must be owner/name')
     with state(args.state) as fixes:
-        mine = [fix for fix in fixes.values() if fix['ticket'] == ticket and fix.get('pr_number') and (args.pr is None or fix['pr_number'] == args.pr)]
+        mine = [fix for fix in fixes.values() if linked(fix, ticket) and fix.get('pr_number')
+                and (args.pr is None or fix['pr_number'] == args.pr)
+                and (args.repository is None or fix['repository'].lower() == args.repository.lower())]
         waiting = [fix for fix in mine if fix['stage'] in ('ready', 'merged')]
         if len(waiting) != 1:
-            why = 'no pull request of this ticket waits to be released' if not waiting else 'several wait: pass --pr'
+            why = ('no pull request of this ticket waits to be released' if not waiting else
+                   'several wait: pass --repository owner/name and --pr NUMBER (PR numbers are repository-local)')
             print(json.dumps({'refused': why, 'requests': [{'stage': fix['stage'], 'pr_url': fix['pr_url'], 'tag': fix.get('release_tag')}
                                                             for fix in mine]}, ensure_ascii=False))
             return 2
@@ -654,6 +816,14 @@ def command_release(args, config):
 
 
 def command_tick(args, config):
+    if args.dry_run:
+        fixes = json.loads(args.state.read_text()) if args.state.exists() else {}
+        for fix in fixes.values():
+            if fix['stage'] == 'pending_confirmation':
+                remind(args, fix)
+            elif fix['stage'] not in DONE:
+                print(f'would check ({fix["ticket"][:8]}): {fix["stage"]}')
+        return 0
     agents = Agents(config)
     args.review_agent = config['REVIEW_AGENT_ID']
     args.fix_agent = config['FIX_AGENT_ID']
@@ -666,9 +836,12 @@ def command_tick(args, config):
             if fix['stage'] in DONE:
                 continue
             try:
+                if fix['stage'] == 'pending_confirmation':
+                    remind(args, fix)
+                    continue
                 while advance(args, agents, fix) and fix['stage'] not in DONE:
                     pass
-            except Failed as error:
+            except (Failed, OSError, subprocess.TimeoutExpired) as error:
                 errors += 1
                 print(f'oncall-fix: ticket {fix["ticket"][:8]}: {error}', file=sys.stderr)
     return 1 if errors else 0
@@ -676,10 +849,15 @@ def command_tick(args, config):
 
 def command_status(args):
     fixes = json.loads(args.state.read_text()) if args.state.exists() else {}
+    if args.json:
+        print(json.dumps(fixes, ensure_ascii=False))
+        return 0
     for fix in sorted(fixes.values(), key=lambda item: item['created']):
         created = datetime.datetime.fromisoformat(fix['created']).astimezone(SHANGHAI).strftime('%m-%d %H:%M')
         print(f'{created} {fix["ticket"][:8]} {fix.get("kind", "fix")} {fix["repository"]} {fix["stage"]} round {fix.get("round", 0)}',
-              fix.get('pr_url') or '', fix.get('release_tag') or '', fix.get('reason', ''))
+              fix.get('pr_url') or '', fix.get('release_tag') or '', fix.get('reason', ''),
+              'verification=' + fix['verification']['result'] if fix.get('verification') else '',
+              'needs_attention' if fix.get('needs_attention') else '')
     return 0
 
 
@@ -689,9 +867,10 @@ def main():
     parser.add_argument('--state', type=Path, default=STATE)
     sub = parser.add_subparsers(dest='command', required=True)
     submit = sub.add_parser('submit', help='start a fix or a design for the current ticket')
-    submit.add_argument('--kind', choices=sorted(KINDS), default='fix')
-    submit.add_argument('--repository', required=True)
-    submit.add_argument('--brief', required=True, help='a file with the request, the evidence and the change or design wanted, or - for stdin')
+    submit.add_argument('--kind', choices=sorted(KINDS))
+    submit.add_argument('--repository')
+    submit.add_argument('--problem-key')
+    submit.add_argument('--brief', help='a file with the request, the evidence and the change or design wanted, or - for stdin')
     submit.add_argument('--ticket', default='')
     submit.add_argument('--by', default='', help='open_id of the person who asked; replies mention them')
     tick = sub.add_parser('tick', help='advance every fix (cron)')
@@ -701,18 +880,41 @@ def main():
     tick.add_argument('--dry-run', action='store_true', help='print the replies instead of sending them')
     merge = sub.add_parser('merge', help='have the Agent that opened it merge the ticket\'s reviewed pull request')
     merge.add_argument('--pr', type=int)
+    merge.add_argument('--repository')
     merge.add_argument('--ticket', default='')
     merge.add_argument('--by', default='', help='open_id of the person who asked; replies mention them')
     release = sub.add_parser('release', help='have the fix Agent release the ticket\'s merged pull request')
     release.add_argument('--pr', type=int)
+    release.add_argument('--repository')
     release.add_argument('--ticket', default='')
     release.add_argument('--by', default='', help='open_id of the person who asked; replies mention them')
-    sub.add_parser('status', help='list the fixes')
+    sub.add_parser('status', help='list the fixes').add_argument('--json', action='store_true')
+    propose = sub.add_parser('propose', help='save a proposal without starting an Agent')
+    propose.add_argument('--repository', required=True)
+    propose.add_argument('--problem-key', required=True)
+    propose.add_argument('--brief', required=True)
+    propose.add_argument('--kind', choices=sorted(KINDS), default='fix')
+    propose.add_argument('--ticket', default='')
+    for command in ('dismiss', 'verify'):
+        action = sub.add_parser(command)
+        action.add_argument('--ticket', default='')
+        action.add_argument('--repository')
+        action.add_argument('--problem-key')
+        action.add_argument('--by', default='', required=command == 'dismiss')
+        if command == 'dismiss':
+            action.add_argument('--reason', required=True)
+        else:
+            action.add_argument('--result', required=True, choices=('passed', 'failed'))
+            action.add_argument('--evidence', required=True)
     args = parser.parse_args()
     try:
         if args.command == 'status':
             return command_status(args)
-        config = load_config(args.config)
+        if args.command == 'propose':
+            return command_propose(args)
+        if args.command in ('dismiss', 'verify'):
+            return command_close(args)
+        config = {} if args.command == 'tick' and args.dry_run else load_config(args.config)
         if args.command == 'submit':
             return command_submit(args, config)
         if args.command == 'merge':

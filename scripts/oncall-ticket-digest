@@ -230,9 +230,19 @@ def read_fixes(path):
         return []
 
 
+def fix_tickets(fix):
+    """Distinct original and associated tickets, normalized to the digest's short IDs."""
+    return {str(ticket)[:8] for ticket in [fix.get('ticket'), *(fix.get('tickets') or [])] if ticket}
+
+
+def fix_verified(fix):
+    return (fix.get('verification') or {}).get('result') == 'passed' and not fix.get('needs_attention')
+
+
 def fix_of(fixes, ticket_ids):
     """The latest fix oncall-fix started from one of these tickets, or None."""
-    found = [fix for fix in fixes if str(fix.get('ticket', ''))[:8] in ticket_ids and fix.get('created')]
+    ids = {str(ticket)[:8] for ticket in ticket_ids}
+    found = [fix for fix in fixes if fix_tickets(fix) & ids and fix.get('created')]
     return max(found, key=lambda fix: fix['created']) if found else None
 
 
@@ -240,15 +250,22 @@ def fix_note(fix, after=None):
     """How far the fix of an issue got, in one Chinese phrase; `after` counts the issue's tickets since its release."""
     link = fix.get('pr_url') or fix.get('repository', '')
     stage = fix.get('stage')
+    if stage in ('pending', 'pending_confirmation'):
+        return f'修复提议待确认：{link}'
+    if stage == 'dismissed':
+        return f'修复提议已驳回：{link}'
+    verification = (fix.get('verification') or {}).get('result')
+    verdict = '验证通过' if fix_verified(fix) else (
+        '验证未通过' if verification == 'failed' or fix.get('needs_attention') else '待验证')
     if stage == 'released':
         when = parse_time(fix['since']).astimezone(SHANGHAI).strftime('%m-%d %H:%M') if fix.get('since') else '?'
         tag = f' {fix["release_tag"]}' if fix.get('release_tag') else ''
-        note = f'已修复：{link}（{when} 发布{tag}）'
+        note = f'已发布：{link}（{when} 发布{tag}），{verdict}'
         if after is None:
             return note
-        return note + (f'，发布后仍有 {after} 张，可能没修好' if after else '，发布后没有新工单')
+        return note + (f'，发布后仍有 {after} 张' if after else '，发布后没有新工单（不代表验证通过）')
     if stage == 'merged':
-        return f'修复已合并、还没发布：{link}'
+        return f'修复已合并、还没发布：{link}，{verdict}'
     if stage == 'ready':
         return f'修复 PR 等人合并：{link}'
     if stage in ('no_pr', 'failed', 'needs_human', 'release_failed'):
@@ -257,16 +274,29 @@ def fix_note(fix, after=None):
 
 
 def fix_markdown(fixes, hours, now):
-    """The digest's line on oncall-fix: fixes started in the window by how far they got, or nothing without fixes."""
-    recent = [fix for fix in fixes if now - parse_time(fix['created']) <= datetime.timedelta(hours=hours)]
-    if not recent:
+    """Count recent starts, but keep unresolved proposals visible regardless of their age."""
+    recent = [fix for fix in fixes if fix.get('created') and
+              datetime.timedelta(0) <= now - parse_time(fix['created']) <= datetime.timedelta(hours=hours)]
+    pending = [fix for fix in fixes if fix.get('stage') in
+               ('pending', 'pending_confirmation', 'ready', 'needs_human', 'failed', 'release_failed')
+               or (fix.get('stage') in ('merged', 'released') and not fix_verified(fix))]
+    if not recent and not pending:
         return []
     count = lambda *stages: sum(1 for fix in recent if fix.get('stage') in stages)
-    pending = [f'- 等人合并：{fix["pr_url"]}' for fix in recent if fix.get('stage') == 'ready']
-    pending += [f'- 需要人看：{fix.get("pr_url") or fix["repository"]}' for fix in recent if fix.get('stage') in ('needs_human', 'failed', 'release_failed')]
-    return [f'**自动修复**（过去 {hours} 小时发起 {len(recent)} 个）：进行中 {count("fixing", "review", "revising", "merging", "releasing")} · '
-            f'等人合并 {count("ready")} · 已发布 {count("released")} · 没开 PR {count("no_pr")} · '
-            f'需要人看 {count("needs_human", "failed", "release_failed")}', *pending, '']
+    lines = [f'**自动修复**（过去 {hours} 小时发起 {len(recent)} 个）：进行中 {count("fixing", "review", "revising", "merging", "releasing")} · '
+             f'等人合并 {count("ready")} · 已发布 {count("released")} · 没开 PR {count("no_pr")} · '
+             f'需要人看 {count("needs_human", "failed", "release_failed")} · 待确认 {count("pending", "pending_confirmation")} · '
+             f'已驳回 {count("dismissed")}']
+    if pending:
+        lines.append(f'未决提议 {len(pending)} 个（按发起时间，最早优先）：')
+    for fix in sorted(pending, key=lambda item: item.get('created', ''))[:10]:
+        age = max(0, int((now - parse_time(fix['created'])).total_seconds() // 3600)) if fix.get('created') else None
+        age_text = f'{age // 24} 天 {age % 24} 小时' if age is not None else '未知'
+        lines.append(f'- {fix_note(fix)}；问题 `{fix.get("problem_key") or "未知"}` / {fix.get("repository") or "未知仓库"}；'
+                     f'年龄 {age_text}；原工单 `{str(fix.get("ticket") or "未知")[:8]}`；关联工单 {len(fix_tickets(fix))} 张')
+    if len(pending) > 10:
+        lines.append(f'另有 {len(pending) - 10} 个未决提议未展示。')
+    return lines + ['']
 
 
 def api_key(credentials, ref):
@@ -359,8 +389,7 @@ def known_markdown(known, now, fixes=()):
 
 
 def digest_markdown(issues, headline, hours, total, now, feedback_lines=(), known=(), fixes=(), tickets=()):
-    """The digest. An issue whose fix was released and has no ticket since is listed under 已修复, as is a known issue
-    whose fix was released in the window and that had no ticket in it, so a fixed problem is not read as unhandled."""
+    """Only explicit successful verification can close a released issue; silence alone cannot."""
     stamp = now.astimezone(SHANGHAI).strftime('%m-%d %H:%M')
     created = {ticket['id']: ticket['created'] for ticket in tickets}
     by_key = {entry['key']: entry for entry in known}
@@ -374,7 +403,7 @@ def digest_markdown(issues, headline, hours, total, now, feedback_lines=(), know
         if fix.get('stage') == 'released' and fix.get('since'):
             after = sum(1 for ticket_id in issue['ticket_ids'] if ticket_id in created and created[ticket_id] > parse_time(fix['since']))
         notes[issue['key']] = fix_note(fix, after)
-        if after == 0:
+        if after == 0 and fix_verified(fix):
             fixed.append(issue)
     open_issues = [issue for issue in issues if issue not in fixed]
     human = [issue for issue in open_issues if issue['needs_human']]
@@ -395,7 +424,7 @@ def digest_markdown(issues, headline, hours, total, now, feedback_lines=(), know
     quiet_fixed = []
     for entry in known:
         fix = fix_of(fixes, {entry['fix_ticket']}) if entry.get('fix_ticket') and entry['key'] not in seen else None
-        if fix and fix.get('stage') == 'released' and fix.get('since') and now - parse_time(fix['since']) <= window:
+        if fix and fix_verified(fix) and fix.get('stage') == 'released' and fix.get('since') and now - parse_time(fix['since']) <= window:
             quiet_fixed.append(f'- {entry["title"]}：{fix_note(fix)}，之后没有新工单')
     if fixed or quiet_fixed:
         lines.append('**已修复**')

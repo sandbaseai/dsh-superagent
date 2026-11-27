@@ -212,16 +212,20 @@ it('counts the fixes oncall-fix started in the feedback window and lists those w
   expect((await digest(await gateway(answer))).code).toBe(0)
   const sent = readFileSync(join(root, 'sent.md'), 'utf8')
   expect(sent).toContain('**自动修复**（过去 48 小时发起 3 个）：进行中 1 · 等人合并 1 · 已发布 0 · 没开 PR 0 · 需要人看 1')
-  expect(sent).toContain('- 等人合并：https://github.com/acme/site/pull/7')
-  expect(sent).toContain('- 需要人看：https://github.com/acme/site/pull/8')
-  expect(sent).not.toContain('acme/old')
+  expect(sent).toContain('修复 PR 等人合并：https://github.com/acme/site/pull/7')
+  expect(sent).toContain('修复没成功（needs_human）：https://github.com/acme/site/pull/8')
+  expect(sent).toContain('acme/old')
+  expect(sent).toContain('年龄 4 天 4 小时')
+  expect(sent).toContain('未决提议 3 个')
 })
 
-it('tells a fixed issue from an open one by the release time of the fix its tickets started', async () => {
+it('requires explicit verification to close a released issue, including one with no new tickets', async () => {
   const at = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString()
   // The stub lark-cli appends every send to sent.md.
   const latest = () => '**工单日报' + readFileSync(join(root, 'sent.md'), 'utf8').split('**工单日报').at(-1)
-  const fix = (minutes: number) => JSON.stringify({ b: { ticket: `bbbbbbbb${'0'.repeat(24)}`, created: at(200), stage: 'released', since: at(minutes),
+  const fix = (minutes: number, result?: string, needs_attention = false) => JSON.stringify({ b: {
+    ticket: `bbbbbbbb${'0'.repeat(24)}`, created: at(200), stage: 'released', since: at(minutes),
+    verification: result ? { result, evidence: 'PRIVATE_EVIDENCE' } : undefined, needs_attention,
     release_tag: 'v1.2.3', repository: 'acme/site', pr_url: 'https://github.com/acme/site/pull/9' } })
   // Released 60 minutes ago: aaaaaaaa, 30 minutes ago, came after it.
   writeFileSync(join(root, 'fixes.json'), fix(60))
@@ -229,20 +233,84 @@ it('tells a fixed issue from an open one by the release time of the fix its tick
   let sent = latest()
   expect(seen.at(-1)!.body.messages[0]!.content).toContain('"id": "bbbbbbbb",')
   expect(seen.at(-1)!.body.messages[0]!.content).toContain('"fix_pr": "https://github.com/acme/site/pull/9"')
-  expect(sent).toMatch(/- \*\*provider-a 计费停用\*\*（2 张，供应商对接）：恢复计费（已修复：https:\/\/github\.com\/acme\/site\/pull\/9（[\d-]+ [\d:]+ 发布 v1\.2\.3），发布后仍有 1 张，可能没修好）/)
-  expect(readFileSync(join(root, 'known.md'), 'utf8')).toContain('已修复：https://github.com/acme/site/pull/9')
-  // Released 10 minutes ago: both tickets came before it, so the issue is listed as fixed, not as needing a person.
-  writeFileSync(join(root, 'fixes.json'), fix(10))
-  expect((await digest(await gateway(answer))).code).toBe(0)
+  expect(sent).toContain('待验证，发布后仍有 1 张')
+  expect(readFileSync(join(root, 'known.md'), 'utf8')).toContain('已发布：https://github.com/acme/site/pull/9')
+  // Silence, failed verification and an attention flag must all keep the issue open.
+  const base = `http://127.0.0.1:${(server!.address() as AddressInfo).port}`
+  for (const [result, attention] of [[undefined, false], ['failed', false], ['passed', true]] as const) {
+    writeFileSync(join(root, 'fixes.json'), fix(10, result, attention))
+    expect((await digest(base, '--feedback-hours', '0')).code).toBe(0)
+    sent = latest()
+    expect(sent).toContain('**需要人处理**')
+    expect(sent).not.toContain('**已修复**')
+    expect(sent).toContain(result ? '验证未通过' : '待验证')
+    expect(sent).not.toContain('PRIVATE_EVIDENCE')
+  }
+  writeFileSync(join(root, 'fixes.json'), fix(10, 'passed'))
+  expect((await digest(base, '--feedback-hours', '0')).code).toBe(0)
   sent = latest()
   expect(sent).not.toContain('**需要人处理**')
-  expect(sent).toContain('**已修复**\n- provider-a 计费停用（2 张，都在发布前）：已修复：https://github.com/acme/site/pull/9')
+  expect(sent).toContain('**已修复**\n- provider-a 计费停用（2 张，都在发布前）：已发布：https://github.com/acme/site/pull/9')
+  expect(sent).toContain('验证通过')
   // A day with no ticket of a known issue whose fix was released in the window still says it was fixed.
   const quiet = { headline: '', issues: [{ key: 'other', title: '别的问题', cause: '', action: '', owner: '', needs_human: false,
     ticket_ids: ['aaaaaaaa', 'cccccccc'] }] }
   expect((await digest(await gateway(quiet))).code).toBe(0)
   sent = latest()
-  expect(sent).toMatch(/\*\*已修复\*\*\n- provider-a 计费停用：已修复：https:\/\/github\.com\/acme\/site\/pull\/9（.*），之后没有新工单/)
+  expect(sent).toMatch(/\*\*已修复\*\*\n- provider-a 计费停用：已发布：https:\/\/github\.com\/acme\/site\/pull\/9（.*），验证通过，之后没有新工单/)
+  const quietBase = `http://127.0.0.1:${(server!.address() as AddressInfo).port}`
+  for (const result of [undefined, 'failed']) {
+    writeFileSync(join(root, 'fixes.json'), fix(10, result))
+    expect((await digest(quietBase, '--feedback-hours', '0')).code).toBe(0)
+    sent = latest()
+    expect(sent).not.toContain('**已修复**')
+    expect(sent).toContain('未决提议 1 个')
+    expect(sent).toContain(result ? '验证未通过' : '待验证')
+  }
+})
+
+it('keeps old unresolved proposals visible without recent starts and caps details at ten', async () => {
+  const stages = ['pending_confirmation', 'ready', 'needs_human', 'failed', 'release_failed', 'merged', 'released', 'released', 'merged', 'pending', 'ready', 'failed']
+  const fixes = stages.map((stage, i) => ({ stage, created: new Date(Date.now() - (200 - i) * 3600_000).toISOString(),
+    since: new Date().toISOString(), ticket: `origin${String(i).padStart(2, '0')}`, tickets: [`origin${String(i).padStart(2, '0')}`, 'related1', 'related1'],
+    repository: 'acme/site', problem_key: `problem-${i}`, brief: 'PRIVATE_BRIEF',
+    verification: i === 7 ? { result: 'failed', evidence: 'PRIVATE_EVIDENCE' } : i === 8 ? { result: 'passed' } : undefined,
+    needs_attention: i === 8 }))
+  writeFileSync(join(root, 'fixes.json'), JSON.stringify(Object.fromEntries([
+    ...fixes.map((fix, i) => [i, fix]),
+    ['dismissed', { ...fixes[0], stage: 'dismissed', problem_key: 'excluded-dismissed' }],
+    ['passed', { ...fixes[6], verification: { result: 'passed' }, problem_key: 'excluded-passed' }],
+  ])))
+  const result = await digest(await gateway(answer), '--feedback-hours', '0')
+  expect(result.code, result.stderr).toBe(0)
+  const sent = readFileSync(join(root, 'sent.md'), 'utf8')
+  expect(sent).toContain('过去 48 小时发起 0 个')
+  expect(sent).toContain('未决提议 12 个')
+  expect(sent).toContain('另有 2 个未决提议未展示')
+  expect(sent.match(/；问题 `/g)).toHaveLength(10)
+  expect(sent).toContain('修复提议待确认')
+  expect(sent).toContain('年龄 8 天 8 小时；原工单 `origin00`；关联工单 2 张')
+  expect(sent).toContain('已发布：acme/site')
+  expect(sent).toContain('修复已合并、还没发布：acme/site，验证未通过')
+  expect(sent).not.toMatch(/PRIVATE_BRIEF|PRIVATE_EVIDENCE|excluded-dismissed|excluded-passed|`problem-10`/)
+})
+
+it('matches associated tickets to a proposal and renders confirmation and dismissal without private text', async () => {
+  const base = await gateway(answer)
+  for (const stage of ['pending_confirmation', 'dismissed']) {
+    writeFileSync(join(root, 'fixes.json'), JSON.stringify({ proposal: {
+      stage, ticket: 'original00000000', tickets: ['original00000000', `bbbbbbbb${'0'.repeat(24)}`],
+      repository: 'acme/site', problem_key: 'billing', created: new Date().toISOString(),
+      brief: 'PRIVATE_BRIEF', verification: { result: 'failed', evidence: 'PRIVATE_EVIDENCE' },
+    } }))
+    const result = await digest(base, '--feedback-hours', '0')
+    expect(result.code, result.stderr).toBe(0)
+    const known = JSON.parse(readFileSync(join(root, 'known.json'), 'utf8'))
+    expect(known[0].fix_ticket).toBe('original')
+    const sent = readFileSync(join(root, 'sent.md'), 'utf8').split('**工单日报').at(-1)!
+    expect(sent).toContain(stage === 'dismissed' ? '修复提议已驳回' : '修复提议待确认')
+    expect(sent).not.toMatch(/PRIVATE_BRIEF|PRIVATE_EVIDENCE/)
+  }
 })
 
 it('posts a short alarm summary with --brief: counts, then only attention items that cite a ticket and pass the review', async () => {
